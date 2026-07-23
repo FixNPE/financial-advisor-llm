@@ -1,3 +1,13 @@
+---
+title: NexWealth AI
+emoji: 💬
+colorFrom: indigo
+colorTo: pink
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # NexWealth AI — Personalized Financial Advisor using LLM
 
 **Product:** *FinAdvisor* — the AI-native wealth-management experience.

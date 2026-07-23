@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.env
+data/chroma/
+data/raw/
+data/processed/
+data/profile.db
+notebooks/data/
+.idea/
+.vscode/
