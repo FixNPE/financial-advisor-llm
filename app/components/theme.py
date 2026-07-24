@@ -29,6 +29,7 @@ NAV_ITEMS: list[tuple[str, str]] = [
     ("Risk Profile",            "pages/3_Risk_Profile.py"),
     ("Recommendations",         "pages/4_Recommendations.py"),
     ("Report",                  "pages/5_Report.py"),
+    ("RAG Explorer",            "pages/6_RAG_Explorer.py"),
 ]
 
 _PIPELINE_STEPS = [
