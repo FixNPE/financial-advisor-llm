@@ -1,42 +1,14 @@
-# Keep secrets and local state out of the image.
-.env
-.env.*
-!.env.example
-
-# Local venv & Python bytecode
-.venv/
+.git
+.venv
 __pycache__/
-*.py[cod]
-*.egg-info/
-
-# Test / dev artifacts
+*.pyc
 .pytest_cache/
-.coverage
-htmlcov/
-tests/
-notebooks/
-
-# Runtime state that must not be baked into the image — mounted as a volume
-# instead. `data/seed/` is copied explicitly by the Dockerfile.
+.ipynb_checkpoints/
+.env
 data/chroma/
-data/prices/
-data/processed/
 data/raw/
+data/processed/
 data/profile.db
-
-# VCS & tooling
-.git/
-.gitignore
-.github/
+notebooks/data/
 .idea/
 .vscode/
-.DS_Store
-
-# Docs & meta
-*.md
-!README.md
-
-# Docker files themselves
-Dockerfile
-.dockerignore
-docker-compose*.yml

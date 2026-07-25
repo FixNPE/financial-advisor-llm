@@ -65,3 +65,5 @@ date,ticker,price,source
 2026-07-22,VXUS,84.45,alpha_vantage
 2026-07-24,VTI,364.69,alpha_vantage
 2026-07-24,CASH,83.12,alpha_vantage
+2026-07-25,BND,72.31,alpha_vantage
+2026-07-25,CASH,85.9,alpha_vantage
