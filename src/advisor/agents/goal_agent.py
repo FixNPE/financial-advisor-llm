@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from advisor.domain.calculators import (
-    EDUCATION_INFLATION_PREMIUM, US_INFLATION, inflate, project_portfolio,
+    EDUCATION_INFLATION_PREMIUM, US_INFLATION, funding_ratio, inflate,
+    monte_carlo_terminal_wealth, outlook_band, project_portfolio,
     required_monthly_sip, success_probability,
 )
 from advisor.domain.models import MODEL_ASSUMPTIONS
@@ -27,6 +28,35 @@ class GoalPlan:
     required_monthly_sip: float
     funding_gap: float
     success_prob: float
+    # Newer, more honest metrics — used alongside success_prob in the UI:
+    #  * funding_ratio: projected / target — distribution-free
+    #  * p10/p50/p90: Monte-Carlo deciles of terminal wealth
+    #  * outlook: "On track" / "Uncertain" / "At risk" (band)
+    funding_ratio: float = 0.0
+    p10: float = 0.0
+    p50: float = 0.0
+    p90: float = 0.0
+    outlook: str = "Uncertain"
+
+
+def _enrich(target_future: float, projected: float, current_savings: float,
+             monthly_contribution: float, r: float, vol: float,
+             years: float, success_prob: float) -> dict:
+    """Compute funding ratio, MC deciles, and outlook band for a GoalPlan."""
+    fr = funding_ratio(projected, target_future)
+    if years > 0 and (current_savings > 0 or monthly_contribution > 0):
+        p10, p50, p90 = monte_carlo_terminal_wealth(
+            current_savings, monthly_contribution, r, vol, years,
+        )
+    else:
+        p10 = p50 = p90 = projected
+    return {
+        "funding_ratio": round(fr, 4),
+        "p10": round(p10, 2),
+        "p50": round(p50, 2),
+        "p90": round(p90, 2),
+        "outlook": outlook_band(fr, success_prob),
+    }
 
 
 def _assumptions(risk_band: str) -> tuple[float, float]:
@@ -46,7 +76,9 @@ def plan_retirement(current_age: int, target_retirement_age: int,
     projected = project_portfolio(current_savings, monthly_contribution, r, years)
     req_sip = required_monthly_sip(target_future, current_savings, r, years)
     gap = max(target_future - projected, 0.0)
-    prob = success_probability(projected, target_future, vol)
+    prob = success_probability(projected, target_future, vol, years)
+    extras = _enrich(target_future, projected, current_savings,
+                      monthly_contribution, r, vol, years, prob)
     return GoalPlan(
         journey="Retirement Planning",
         target_amount_today=round(target_today, 2),
@@ -58,6 +90,7 @@ def plan_retirement(current_age: int, target_retirement_age: int,
         required_monthly_sip=round(req_sip, 2),
         funding_gap=round(gap, 2),
         success_prob=round(prob, 3),
+        **extras,
     )
 
 
@@ -71,7 +104,9 @@ def plan_child_education(child_current_age: int, target_cost_today: float,
     projected = project_portfolio(current_savings, monthly_contribution, r, years)
     req_sip = required_monthly_sip(target_future, current_savings, r, years)
     gap = max(target_future - projected, 0.0)
-    prob = success_probability(projected, target_future, vol)
+    prob = success_probability(projected, target_future, vol, years)
+    extras = _enrich(target_future, projected, current_savings,
+                      monthly_contribution, r, vol, years, prob)
     return GoalPlan(
         journey="Child Education",
         target_amount_today=round(target_cost_today, 2),
@@ -83,6 +118,7 @@ def plan_child_education(child_current_age: int, target_cost_today: float,
         required_monthly_sip=round(req_sip, 2),
         funding_gap=round(gap, 2),
         success_prob=round(prob, 3),
+        **extras,
     )
 
 
@@ -104,7 +140,9 @@ def plan_buy_home(home_price: float, down_payment_pct: float,
     projected = project_portfolio(current_savings, monthly_saving_capacity, r, years)
     req_sip = required_monthly_sip(target_future, current_savings, r, years)
     gap = max(target_future - projected, 0.0)
-    prob = success_probability(projected, target_future, vol)
+    prob = success_probability(projected, target_future, vol, years)
+    extras = _enrich(target_future, projected, current_savings,
+                      monthly_saving_capacity, r, vol, years, prob)
     return GoalPlan(
         journey="Buy Home",
         target_amount_today=round(down_payment_today, 2),
@@ -116,4 +154,5 @@ def plan_buy_home(home_price: float, down_payment_pct: float,
         required_monthly_sip=round(req_sip, 2),
         funding_gap=round(gap, 2),
         success_prob=round(prob, 3),
+        **extras,
     )

@@ -65,23 +65,104 @@ def inflate(present_amount: float, years: float, inflation: float = US_INFLATION
     return present_amount * ((1 + inflation) ** years)
 
 
-def success_probability(projected: float, target: float, volatility: float) -> float:
-    """Rough success probability that the portfolio meets ``target``.
+def success_probability(projected: float, target: float, volatility: float,
+                          years: float = 1.0) -> float:
+    """Probability that the portfolio meets ``target`` at horizon.
 
-    Models the projected value as normally distributed with mean=projected and
-    std = projected * volatility, and computes P(X >= target). Volatility here
-    is the annualized portfolio std-dev (from MODEL_ASSUMPTIONS). This is a
-    demo-grade approximation, not a Monte Carlo — but it captures the
-    "further gap = lower probability" intuition the report needs.
+    Models the terminal wealth as log-normal with expected value ``projected``
+    and log-std that scales with ``sqrt(years)`` — the correct dimensional
+    behaviour for a compounded return. The previous version used the annual
+    volatility as the *terminal* std (no time scaling), which made every
+    plan with the smallest funding gap collapse to <1%.
+
+    ``volatility`` is the annualised portfolio std-dev (from
+    MODEL_ASSUMPTIONS); ``years`` is the plan horizon. If projected == 0 or
+    target == 0 we short-circuit.
     """
     if projected <= 0:
         return 0.0
     if target <= 0:
         return 1.0
-    std = max(projected * volatility, 1e-6)
-    z = (target - projected) / std
-    # 1 - Phi(z), using erf-based normal CDF
+    if years <= 0:
+        return 1.0 if projected >= target else 0.0
+    sigma = max(volatility * math.sqrt(years), 1e-6)
+    # log-normal: median = projected * exp(-sigma^2/2); we set the mean to
+    # ``projected`` and back out mu so E[X] = projected.
+    mu = math.log(projected) - 0.5 * sigma ** 2
+    # P(X >= target) = 1 - Phi((ln target - mu)/sigma)
+    z = (math.log(target) - mu) / sigma
     return clamp(0.5 * (1 - math.erf(z / math.sqrt(2))), 0.0, 1.0)
+
+
+def funding_ratio(projected: float, target: float) -> float:
+    """``projected / target``, clamped at 0 and 5.
+
+    A distribution-free "how funded is this plan" number that reads
+    intuitively (79% funded, 120% funded). Free of the volatility-scaling
+    trap that plagues success_probability.
+    """
+    if target <= 0:
+        return 1.0 if projected >= 0 else 0.0
+    return clamp(projected / target, 0.0, 5.0)
+
+
+def outlook_band(funding_ratio_value: float, success_prob_value: float) -> str:
+    """Human label for the plan's overall health.
+
+    Combines funding ratio and success probability so we don't flag a
+    plan as "at risk" only because its Monte-Carlo tail is thin. Bands
+    are calibrated to keep the *action guidance* sensible: a 95% funded
+    plan is Uncertain, not At risk, even if the probability of clearing
+    the target on the nose is 40%.
+    """
+    if funding_ratio_value >= 1.0 or success_prob_value >= 0.70:
+        return "On track"
+    if funding_ratio_value >= 0.75 or success_prob_value >= 0.35:
+        return "Uncertain"
+    return "At risk"
+
+
+def monte_carlo_terminal_wealth(current_savings: float,
+                                  monthly_contribution: float,
+                                  annual_return: float,
+                                  volatility: float,
+                                  years: float,
+                                  n_paths: int = 2000,
+                                  seed: int = 42) -> tuple[float, float, float]:
+    """Bootstrap p10/p50/p90 of terminal wealth via a monthly-return simulation.
+
+    Draws monthly log-returns from Normal(mu_m, sigma_m) where
+    ``mu_m = ln(1+r)/12`` and ``sigma_m = vol/sqrt(12)``; compounds a lump-sum
+    with a level monthly contribution over ``years * 12`` steps. Returns
+    (p10, p50, p90) terminal-wealth percentiles.
+
+    Deterministic under a fixed ``seed`` so pipeline runs stay reproducible.
+    2000 paths is enough for stable deciles at demo scale (<10ms).
+    """
+    if years <= 0 or (current_savings <= 0 and monthly_contribution <= 0):
+        v = max(current_savings, 0.0)
+        return v, v, v
+    import random
+    rng = random.Random(seed)
+    n_months = int(round(years * 12))
+    mu_m = math.log(1 + annual_return) / 12
+    sigma_m = volatility / math.sqrt(12)
+    finals: list[float] = []
+    for _ in range(n_paths):
+        wealth = current_savings
+        for _m in range(n_months):
+            # Box-Muller for a standard normal (avoid numpy dependency).
+            u1 = 1.0 - rng.random()  # (0,1]
+            u2 = rng.random()
+            z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2 * math.pi * u2)
+            r = math.exp(mu_m + sigma_m * z) - 1.0
+            wealth = wealth * (1 + r) + monthly_contribution
+        finals.append(wealth)
+    finals.sort()
+    def pct(p: float) -> float:
+        idx = clamp(int(p * len(finals)), 0, len(finals) - 1)
+        return finals[int(idx)]
+    return pct(0.10), pct(0.50), pct(0.90)
 
 
 def drift(current_pct: dict[str, float], target_pct: dict[str, float]) -> dict[str, float]:

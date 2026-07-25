@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 from advisor.config import settings
 from advisor.guardrails import apply_guardrails
+from advisor.llm.client import last_error as llm_last_error
 from advisor.llm.prompts import build_system_prompt
 from advisor.rag.retrieve import HybridRetriever, format_snippets
 from advisor.tools.registry import DISPATCH, TOOLS
@@ -74,15 +75,18 @@ def _react_system_prompt(profile: dict | None, rag_block: str,
     base = build_system_prompt(profile, rag_block, page_facts=page_facts)
     react_instructions = (
         "\n\nREACT LOOP\n"
-        "- If a quantitative or live-market fact is needed, CALL A TOOL rather "
-        "than guessing. Prefer tools over prose.\n"
-        "- If PAGE FACTS above contain a number the user is asking about, "
-        "USE THAT NUMBER — do not recompute it with a tool. Recompute only "
-        "when the user is asking a *what-if* that changes an input.\n"
-        "- For any journey plan recompute (e.g. \"what if I switch to "
-        "Aggressive\"), call `plan_journey` with the risk_band the user "
-        "asked about — do NOT use `retirement_projection` with a guessed "
-        "annual_return.\n"
+        "- **PLAN LOOKUP RULE (highest priority):** if the user asks 'how is my "
+        "plan looking / is it in good shape / what's my target / SIP / "
+        "success probability', DO NOT call a tool. Answer directly from "
+        "PAGE FACTS. The numbers there are the authoritative plan.\n"
+        "- **WHAT-IF RULE:** only call `plan_retirement` / `plan_education` / "
+        "`plan_home` when the user explicitly changes an input (e.g. 'what "
+        "if I retire at 65', 'what if I switch to Aggressive'). When you do "
+        "call one, copy the goal_inputs values from PAGE FACTS **verbatim** — "
+        "do NOT invent target_cost_today, bump monthly_contribution, or "
+        "round current_savings. Change only the field the user asked about.\n"
+        "- If a quantitative or live-market fact is needed and it is NOT in "
+        "PAGE FACTS, then call a tool rather than guessing.\n"
         "- Chain tool calls when necessary (e.g. get_stock_quote → "
         "get_company_overview → asset_allocation).\n"
         "- After each tool result, decide whether more tool calls are needed "
@@ -92,6 +96,15 @@ def _react_system_prompt(profile: dict | None, rag_block: str,
         "retrieved snippet you leaned on.\n"
         f"- You have at most {MAX_REACT_STEPS} tool-call rounds — plan "
         "accordingly.\n"
+        "\nWORKED EXAMPLE\n"
+        "User: 'How is the plan for my child education looking?'\n"
+        "Correct: No tool call. Read PAGE FACTS → 'Your child-education plan "
+        "shows a target of ${target_future} with a projected ${projected} at "
+        "horizon — a funding ratio of {ratio}% ({outlook}). Required SIP to "
+        "close the gap is ${sip}/mo. Monte-Carlo p10/p50/p90: ${p10}/${p50}/"
+        "${p90}.'\n"
+        "Wrong: Calling plan_education with target_cost_today=430000 and "
+        "monthly_contribution=1000 (numbers not in PAGE FACTS).\n"
     )
     return base + react_instructions
 
@@ -216,20 +229,108 @@ def _run_react_loop(question: str, profile: dict | None,
     return final_text, tool_calls_seen, MAX_REACT_STEPS, "max_steps"
 
 
-# ---------- Fallback: snippet-echo -------------------------------------------
+# ---------- Fallback: grounded plan summary ---------------------------------
+#
+# Used when the LLM is unavailable — either not configured, or the provider
+# raised (401/402/5xx). We synthesise an answer from the numbers already on
+# the user's page (``page_facts``) plus their profile, so the reply still
+# reflects reality. RAG snippets are appended at the bottom as reference
+# reading. A banner at the top tells the user *why* they're seeing this
+# shape instead of the LLM answer.
 
-def _fallback_answer(question: str, snippets: list[dict]) -> str:
-    if not snippets:
-        return ("I don't have retrieved context that covers this question. Try "
-                "rephrasing, or ask about retirement, education, or home-buying "
-                "planning — I have grounded playbooks for those.")
-    lines = [f"Based on the retrieved sources, here's what applies to *{question.strip()}*:", ""]
-    for s in snippets[:3]:
-        excerpt = s["text"].strip().replace("\n", " ")
-        if len(excerpt) > 320:
-            excerpt = excerpt[:317] + "..."
-        lines.append(f"- {excerpt}  [Source: {s['source']}]")
-    return "\n".join(lines)
+def _fallback_banner(reason: str) -> str:
+    if reason == "no_llm":
+        return ("*LLM is not configured (LLM_PROVIDER=none) — showing grounded "
+                "numbers from your plan instead of a generated reply.*")
+    # For LLM errors, surface the specific reason (401/402/timeout/etc.) that
+    # ``advisor.llm.client`` classified on the failed call. Without this the
+    # user only ever sees "LLM temporarily unavailable" and can't tell whether
+    # a rotated HF_TOKEN was accepted, whether credits are exhausted, or
+    # whether the model route is wrong.
+    detail = llm_last_error()
+    if detail:
+        return (f"*LLM unavailable — {detail}. Showing grounded numbers from "
+                "your plan instead of a generated reply.*")
+    return ("*LLM temporarily unavailable — showing grounded numbers from your "
+            "plan instead of a generated reply.*")
+
+
+def _format_plan_lines(page_facts: dict | None) -> list[str]:
+    if not page_facts:
+        return []
+    ordered = (
+        "Risk band", "Active model", "Assumed annual return",
+        "Horizon (years)", "Target amount (future $)",
+        "Projected amount at horizon", "Funding ratio", "Outlook",
+        "Monte-Carlo p10 / p50 / p90",
+        "Success probability", "Success probability (illustrative)",
+        "Required monthly SIP",
+    )
+    lines: list[str] = []
+    for key in ordered:
+        value = page_facts.get(key)
+        if value not in (None, "", [], {}):
+            lines.append(f"- **{key}:** {value}")
+    return lines
+
+
+def _format_profile_lines(profile: dict | None) -> list[str]:
+    if not profile:
+        return []
+    lines: list[str] = []
+    if profile.get("age") is not None:
+        lines.append(f"- **Age:** {profile['age']}")
+    if profile.get("income") is not None:
+        lines.append(f"- **Annual income:** ${profile['income']:,.0f}")
+    goals = profile.get("goals") or []
+    if goals:
+        lines.append(f"- **Goal:** {', '.join(goals)}")
+    if profile.get("risk_tolerance") and profile["risk_tolerance"] != "unspecified":
+        lines.append(f"- **Risk tolerance:** {profile['risk_tolerance']}")
+    gi = profile.get("goal_inputs") or {}
+    if gi:
+        lines.append("- **Goal inputs:** " + ", ".join(
+            f"{k}={v}" for k, v in gi.items()))
+    if profile.get("holdings"):
+        lines.append(f"- **Holdings:** {profile['holdings']}")
+    return lines
+
+
+def _fallback_answer(question: str,
+                       snippets: list[dict],
+                       profile: dict | None = None,
+                       page_facts: dict | None = None,
+                       reason: str = "llm_error") -> str:
+    parts: list[str] = [_fallback_banner(reason), ""]
+
+    plan_lines = _format_plan_lines(page_facts)
+    if plan_lines:
+        parts.append(f"**Your plan for _{question.strip()}_**")
+        parts.extend(plan_lines)
+        parts.append("")
+
+    profile_lines = _format_profile_lines(profile)
+    if profile_lines:
+        parts.append("**Profile snapshot**")
+        parts.extend(profile_lines)
+        parts.append("")
+
+    if snippets:
+        parts.append("**Reference reading from the corpus**")
+        for s in snippets[:3]:
+            excerpt = s["text"].strip().replace("\n", " ")
+            if len(excerpt) > 320:
+                excerpt = excerpt[:317] + "..."
+            parts.append(f"- {excerpt}  [Source: {s['source']}]")
+
+    if not plan_lines and not profile_lines and not snippets:
+        parts.append(
+            "I don't have plan numbers or retrieved context to answer this yet. "
+            "Try loading a customer with a set goal, or ask about retirement, "
+            "education, or home-buying planning."
+        )
+
+    return "\n".join(parts).strip()
 
 
 # ---------- Public entry point -----------------------------------------------
@@ -258,7 +359,8 @@ def answer_question(question: str, profile: dict | None = None,
     def _generate(_user_text: str) -> str:
         if settings.llm_provider == "none" or not settings.hf_token:
             meta["stopped_reason"] = "no_llm"
-            return _fallback_answer(question, snippets)
+            return _fallback_answer(question, snippets, profile=profile,
+                                     page_facts=page_facts, reason="no_llm")
         try:
             text, calls, steps, stopped = _run_react_loop(
                 question, profile, snippets, page_facts,
@@ -269,11 +371,13 @@ def answer_question(question: str, profile: dict | None = None,
             # Empty LLM reply → fall back so the UI has something to render.
             if not text:
                 meta["stopped_reason"] = "llm_error"
-                return _fallback_answer(question, snippets)
+                return _fallback_answer(question, snippets, profile=profile,
+                                         page_facts=page_facts, reason="llm_error")
             return text
         except Exception:
             meta["stopped_reason"] = "llm_error"
-            return _fallback_answer(question, snippets)
+            return _fallback_answer(question, snippets, profile=profile,
+                                     page_facts=page_facts, reason="llm_error")
 
     response, blocked = apply_guardrails(question, _generate)
 

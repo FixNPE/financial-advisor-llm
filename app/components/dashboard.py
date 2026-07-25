@@ -76,11 +76,42 @@ def render(customer: Customer, result: PipelineResult) -> None:
         ),
     )
     g4.metric(
-        "Success prob", _fmt_pct(goal.success_prob * 100),
+        "Funding ratio", _fmt_pct(goal.funding_ratio * 100),
+        goal.outlook,
         help=(
-            "Rule-based estimate of the probability of hitting the future target, using "
-            "a normal-return approximation on the model portfolio's expected return and "
-            "volatility. Directional, not a Monte-Carlo output."
+            "Projected ÷ Target (year N). Distribution-free 'how funded is the "
+            "plan?' number. Outlook band: On track (≥100% funded or ≥70% success "
+            "probability), Uncertain (75–99% funded or ≥35% prob), At risk otherwise."
+        ),
+    )
+
+    # Second row: honest range from Monte-Carlo simulation + the older
+    # single-point success probability (kept for continuity but relabelled
+    # 'illustrative').
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(
+        "MC p10 (downside)", _fmt_usd(goal.p10),
+        help=(
+            "10th percentile of terminal wealth from a 2000-path Monte-Carlo "
+            "simulation. Roughly 'in 1 out of 10 scenarios you finish with less "
+            "than this'."
+        ),
+    )
+    m2.metric(
+        "MC p50 (median)", _fmt_usd(goal.p50),
+        help="Median terminal wealth across the Monte-Carlo paths.",
+    )
+    m3.metric(
+        "MC p90 (upside)", _fmt_usd(goal.p90),
+        help="90th percentile — best-case-ish; the *upside* to plan around.",
+    )
+    m4.metric(
+        "Success prob (illustrative)", _fmt_pct(goal.success_prob * 100),
+        help=(
+            "P(terminal wealth ≥ target) under a log-normal approximation. "
+            "Tends to swing hard around the target because it collapses the "
+            "full distribution to one number — read alongside the funding "
+            "ratio and MC band above."
         ),
     )
 
@@ -151,19 +182,20 @@ def render(customer: Customer, result: PipelineResult) -> None:
     )
     bm = result.benchmark
     b1, b2 = st.columns([2, 3])
-    b1.markdown(
-        f"""
-        <div class="nw-card">
-          <div style="font-size:12px; color:#6B7280; letter-spacing:.06em;
-                        text-transform:uppercase;">Proxy benchmark</div>
-          <div style="font-size:18px; font-weight:700; padding:4px 0 2px 0;">
-            {bm.proxy_ticker}
-          </div>
-          <div style="font-size:14px; color:#3F4A63;">{bm.proxy_name}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    with b1:
+        # Real Streamlit container so we can nest a native clickable help
+        # tooltip inside — st.caption(help=...) doesn't work inside raw HTML.
+        with st.container(border=True):
+            st.markdown(
+                f'<div style="font-size:12px; color:#6B7280; letter-spacing:.06em; '
+                f'text-transform:uppercase;">Proxy benchmark</div>'
+                f'<div style="font-size:18px; font-weight:700; padding:4px 0 2px 0;">'
+                f'{bm.proxy_ticker}</div>'
+                f'<div style="font-size:14px; color:#3F4A63; padding-bottom:8px;">'
+                f'{bm.proxy_name}</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Why this proxy?", help=bm.rationale)
     with b2:
         r1, r2 = st.columns(2)
         r1.metric(
@@ -176,17 +208,31 @@ def render(customer: Customer, result: PipelineResult) -> None:
                 "not realised."
             ),
         )
+        _bench_help_src = (
+            f"Realized CAGR of {bm.proxy_ticker} from Alpha Vantage weekly closes "
+            f"(~{bm.benchmark_series_weeks} weekly observations over ~5Y, 24h cached)."
+            if bm.benchmark_source == "live_5y"
+            else f"Illustrative long-run return for {bm.proxy_ticker} — live series "
+                 "unavailable, using the model's reference constant."
+        )
         r2.metric(
             "Benchmark return",
             _fmt_pct(bm.benchmark_expected_return * 100),
             _fmt_pct(bm.excess_return * 100),
             help=(
-                "Expected annual return of the proxy benchmark for this risk band "
-                "(iShares AOM / AOR / AOA). Delta shown below is **excess return** "
-                "= portfolio − benchmark. Positive = portfolio expected to beat "
-                "the market blend; negative = lagging."
+                f"{_bench_help_src} Delta shown below is **excess return** = "
+                "portfolio − benchmark. Positive = portfolio expected to beat "
+                "the peer; negative = lagging."
             ),
         )
+        # Caption on r2 so it sits directly under the Benchmark return card,
+        # not spanning both columns.
+        _src_caption = (
+            f"*Live CAGR from Alpha Vantage · {bm.benchmark_series_weeks} weekly obs (~5Y)*"
+            if bm.benchmark_source == "live_5y"
+            else "*Illustrative reference return — live series unavailable*"
+        )
+        r2.caption(_src_caption)
     st.caption(f"**Underlying blend:** {bm.blend_description}")
 
     st.markdown("### HITL decision log")

@@ -1,4 +1,12 @@
-"""Home — customer selector, quick-start prompts, new-customer onboarding."""
+"""Home — pick an existing user or chat-onboard a new one.
+
+Two modes toggle by ``KEY_USER_MODE`` in session state (``existing`` / ``new``):
+
+  * ``existing``: search + selectbox of seeded customers, then Load.
+  * ``new``: chat-driven onboarding — 8 sequential questions handled by
+    ``app.components.onboarding``. On completion, we build a Customer,
+    run the 8-step pipeline, and switch to the Dashboard.
+"""
 import sys
 from pathlib import Path
 
@@ -8,11 +16,19 @@ sys.path.insert(0, str(_ROOT))
 
 import streamlit as st  # noqa: E402
 
-from advisor.domain.data import Customer, list_customers, upsert_customer  # noqa: E402
+from advisor.agents.orchestrator import run_pipeline  # noqa: E402
+from advisor.domain.data import get_customer, list_customers  # noqa: E402
 
-from app.components.floating_chat import render_floating_chat  # noqa: E402
+from app.components.chat_ui import (  # noqa: E402
+    push_bot, push_user, render_context_panel, render_history,
+)
+from app.components.onboarding import (  # noqa: E402
+    KEY_ONBOARD_HISTORY, commit_customer_and_run, context_lines,
+    next_bot_prompt, onboarding_complete, onboarding_progress,
+    onboarding_state, reset_onboarding, submit_answer,
+)
 from app.components.session import (  # noqa: E402
-    KEY_PENDING_QUESTION, set_active_customer,
+    KEY_LAST_PIPELINE, set_active_customer,
 )
 from app.components.theme import BRAND_NAME, apply_theme  # noqa: E402
 
@@ -21,119 +37,230 @@ st.set_page_config(page_title=f"Home · {BRAND_NAME}",
 
 customer = apply_theme(page_key="Home")
 
-st.markdown(f'<div class="nw-hero-title">Welcome to {BRAND_NAME}</div>',
-                unsafe_allow_html=True)
+KEY_USER_MODE = "home_user_mode"  # "existing" | "new"
+KEY_ONBOARD_COMMITTED_ID = "onboard_committed_customer_id"
+
+if KEY_USER_MODE not in st.session_state:
+    st.session_state[KEY_USER_MODE] = "existing"
+
+# --- Header ---------------------------------------------------------
+_mode = st.session_state[KEY_USER_MODE]
+# Once the user picks a goal in onboarding, reflect it in the hero title.
+# Before that, keep the header goal-agnostic so we don't imply a bias.
+_onboard_state = st.session_state.get("onboard_state", {}) or {}
+_chosen_goal = _onboard_state.get("goal_type") if _mode == "new" else None
+_hero_journey = _chosen_goal or "Financial planning"
+_hero_sub = (
+    "FinAdvisor will ask you a few questions to build your plan"
+    if _mode == "new" else
+    "Pick a seeded customer to jump into their plan"
+)
 st.markdown(
-    '<div class="nw-hero-sub">Plan, review, and approve investment decisions '
-    'right in the chat panel.</div>',
+    f'<div class="nw-hero-title">{_hero_journey} — '
+    f'{"new user onboarding" if _mode == "new" else "existing user"}</div>',
     unsafe_allow_html=True,
 )
+st.markdown(f'<div class="nw-hero-sub">{_hero_sub}</div>',
+                unsafe_allow_html=True)
 
-# ------------------------- Select a customer -------------------------
-st.markdown("### Select a customer")
-customers = list_customers()
+# --- Mode toggle ---------------------------------------------------
+st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+mode_cols = st.columns([1, 1, 6])
+with mode_cols[0]:
+    if st.button("New user", use_container_width=True,
+                    type=("primary" if _mode == "new" else "secondary")):
+        st.session_state[KEY_USER_MODE] = "new"
+        st.rerun()
+with mode_cols[1]:
+    if st.button("Existing", use_container_width=True,
+                    type=("primary" if _mode == "existing" else "secondary")):
+        st.session_state[KEY_USER_MODE] = "existing"
+        st.rerun()
 
-if not customers:
-    st.info("No customers loaded yet. Run `make seed` to load the hero customers.")
-else:
-    label_by_id = {
-        c.id: f"#{c.external_id} — {c.name} "
-                f"({c.age}, ${c.annual_income:,.0f}/yr"
-                + (f", {c.primary_goal}" if c.primary_goal else "")
-                + ")"
-        for c in customers
-    }
+st.markdown('<div style="height:12px;"></div>', unsafe_allow_html=True)
 
-    query = st.text_input(
-        "Search customers", placeholder="Search by name or ID…",
-        label_visibility="collapsed",
-    )
-    filtered_ids = [
-        cid for cid, lbl in label_by_id.items()
-        if query.lower() in lbl.lower()
-    ] or list(label_by_id.keys())
+# --- Body -----------------------------------------------------------
+main_col, ctx_col = st.columns([3, 2], gap="large")
 
-    default_index = (
-        filtered_ids.index(customer.id)
-        if customer and customer.id in filtered_ids else 0
-    )
-    chosen = st.selectbox(
-        "Customer",
-        options=filtered_ids,
-        format_func=lambda i: label_by_id[i],
-        index=default_index,
-        label_visibility="collapsed",
-    )
+# ==================================================================
+# EXISTING user mode
+# ==================================================================
+if _mode == "existing":
+    with main_col:
+        customers = list_customers()
+        if not customers:
+            st.info("No customers loaded yet. Run `make seed` to load the hero customers.")
+        else:
+            label_by_id = {
+                c.id: f"#{c.external_id} — {c.name} ({c.age}, "
+                        f"${c.annual_income:,.0f}/yr"
+                        + (f", {c.primary_goal}" if c.primary_goal else "")
+                        + ")"
+                for c in customers
+            }
+            query = st.text_input(
+                "Search customers", placeholder="Search by name or ID…",
+                label_visibility="collapsed",
+            )
+            filtered_ids = [
+                cid for cid, lbl in label_by_id.items()
+                if query.lower() in lbl.lower()
+            ] or list(label_by_id.keys())
+            default_index = (
+                filtered_ids.index(customer.id)
+                if customer and customer.id in filtered_ids else 0
+            )
+            chosen = st.selectbox(
+                "Customer", options=filtered_ids,
+                format_func=lambda i: label_by_id[i], index=default_index,
+                label_visibility="collapsed",
+            )
+            if st.button("Load Customer", type="primary", use_container_width=True):
+                set_active_customer(chosen)
+                st.switch_page("pages/1_FinAdvisor.py")
 
-    left, _ = st.columns([1, 3])
-    with left:
-        if st.button("Load Customer", type="primary", use_container_width=True):
-            set_active_customer(chosen)
-            st.switch_page("pages/1_FinAdvisor.py")
-
-st.divider()
-
-# ------------------------- Start a new customer -------------------------
-st.markdown("### Or start a new customer")
-with st.form("new_customer_form", clear_on_submit=False):
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        full_name = st.text_input("Full name", placeholder="e.g. Alex Johnson")
-    with c2:
-        age = st.number_input("Age", min_value=18, max_value=100, value=35, step=1)
-    with c3:
-        income = st.number_input("Annual income (USD)", min_value=0.0,
-                                    value=80_000.0, step=1_000.0)
-    submitted = st.form_submit_button(
-        "Start New Customer Onboarding", type="primary", use_container_width=True,
-    )
-
-if submitted:
-    name = full_name.strip()
-    if not name:
-        st.error("Please enter a name to start onboarding.")
-    else:
-        existing_ids = {c.external_id for c in list_customers()}
-        base = "N" + str(len(existing_ids) + 1).zfill(3)
-        external_id = base
-        i = 1
-        while external_id in existing_ids:
-            i += 1
-            external_id = f"{base}-{i}"
-        new_customer = Customer(
-            id=None, external_id=external_id, name=name,
-            age=int(age), annual_income=float(income),
+    with ctx_col:
+        loaded = get_customer(customer.id) if customer else None
+        parameters: list[tuple[str, str]] = []
+        if loaded:
+            parameters = [
+                ("Name", loaded.name),
+                ("Age", str(loaded.age)),
+                ("Income", f"${loaded.annual_income:,.0f}/yr"),
+                ("Goal", loaded.primary_goal or "not set"),
+            ]
+        render_context_panel(
+            title="SESSION CONTEXT",
+            intake_label="Profile loaded" if loaded else "No profile loaded yet",
+            intake_percent=100 if loaded else 0,
+            parameters=parameters,
         )
-        new_id = upsert_customer(new_customer)
-        set_active_customer(new_id)
-        st.session_state.pop(KEY_PENDING_QUESTION, None)
-        st.success(f"Welcome, {name}. Let's set your risk profile.")
-        st.switch_page("pages/3_Risk_Profile.py")
 
-st.divider()
+# ==================================================================
+# NEW user mode — chat-driven onboarding
+# ==================================================================
+else:
+    history: list[dict[str, str]] = st.session_state.setdefault(
+        KEY_ONBOARD_HISTORY, []
+    )
 
-# ------------------------- Quick-start prompts -------------------------
-st.markdown("### Try a quick-start prompt")
-st.markdown('<div class="nw-quickstart-row">', unsafe_allow_html=True)
-QUICK_STARTS = [
-    ("Retirement Planning",  "Am I on track for retirement at 65?"),
-    ("Child Education",      "Save for my daughter's college in 12 years"),
-    ("Buy a Home",           "Down payment for a home in 2029"),
-    ("Financial Q&A",        "What is a mutual fund vs an ETF?"),
-]
-cols = st.columns(4)
-for col, (label, prompt) in zip(cols, QUICK_STARTS):
-    with col:
-        if st.button(label, key=f"qs_{label}", use_container_width=True):
-            st.session_state[KEY_PENDING_QUESTION] = prompt
-            st.switch_page("pages/1_FinAdvisor.py")
-st.markdown("</div>", unsafe_allow_html=True)
+    # Kick off with the first bot prompt if the history is empty.
+    if not history:
+        first = next_bot_prompt()
+        if first is not None:
+            push_bot(history, first)
+            st.session_state[KEY_ONBOARD_HISTORY] = history
 
-render_floating_chat(
-    page_key="Home",
-    page_context={
-        "Active customer": customer.name if customer else "none",
-        "Journey on file": (customer.primary_goal if customer else None) or "not set",
-    },
-    customer=customer,
-)
+    with main_col:
+        render_history(history)
+
+        # ---- Completion path -----------------------------------
+        if onboarding_complete():
+            state = onboarding_state()
+            journey = state.get("goal_type", "Retirement Planning")
+
+            # Persist the new customer + run the pipeline exactly ONCE per
+            # completed onboarding. commit_customer_and_run() is NOT idempotent
+            # — every call inserts a new customer row — so we track the
+            # committed id in its own session key. A stale KEY_LAST_PIPELINE
+            # from a prior session must NOT short-circuit this: without the
+            # commit, the completion card would render another customer's
+            # numbers and journey.
+            committed_id = st.session_state.get(KEY_ONBOARD_COMMITTED_ID)
+            loaded = None
+            if committed_id is None:
+                with st.spinner(f"Running your {journey.lower()} analysis..."):
+                    new_id = commit_customer_and_run()
+                    st.session_state[KEY_ONBOARD_COMMITTED_ID] = new_id
+                    loaded = get_customer(new_id)
+                    if loaded:
+                        result = run_pipeline(
+                            loaded, journey,
+                            loaded.goal_inputs, allow_live_prices=True,
+                        )
+                        st.session_state[KEY_LAST_PIPELINE] = result
+
+            result = st.session_state.get(KEY_LAST_PIPELINE)
+            if result is not None:
+                if loaded is None:
+                    loaded = get_customer(result.customer_id)
+                goal = result.goal
+                risk = result.risk
+                journey_label = result.journey
+                with st.chat_message("assistant"):
+                    st.markdown(
+                        f"Here is your **{risk.risk_band.lower()}-risk "
+                        f"{journey_label.lower()} plan** based on your profile:"
+                    )
+                    m1, m2 = st.columns(2)
+                    m1.metric("Corpus / target needed",
+                                f"${goal.target_amount_future:,.0f}",
+                                help="Inflation-adjusted target")
+                    m2.metric("Required monthly SIP",
+                                f"${goal.required_monthly_sip:,.0f}")
+                    m3, m4 = st.columns(2)
+                    m3.metric("Funding ratio",
+                                f"{goal.funding_ratio * 100:.0f}%",
+                                goal.outlook,
+                                help="Projected ÷ Target — how funded the "
+                                        "plan is. Outlook: On track / "
+                                        "Uncertain / At risk.")
+                    m4.metric("MC p10 → p90",
+                                f"${goal.p10:,.0f} → ${goal.p90:,.0f}",
+                                help="10th–90th percentile terminal wealth "
+                                        f"from a 2000-path Monte-Carlo "
+                                        f"simulation under {risk.risk_band} "
+                                        "assumptions")
+
+                    st.markdown("**Top recommendations for your portfolio:**")
+                    for i, opt in enumerate(result.recommendation.options, 1):
+                        st.markdown(
+                            f"- Priority {i} — **{opt.model}** portfolio: "
+                            f"expected return {opt.expected_return * 100:.1f}%, "
+                            f"volatility {opt.volatility * 100:.1f}%, "
+                            f"fit vs current {opt.fit_score:.0f}/100"
+                        )
+
+                    if st.button("Open the full plan on the Dashboard →",
+                                    type="primary", use_container_width=True,
+                                    key="onboard_go_dashboard"):
+                        st.switch_page("pages/2_Dashboard.py")
+                    if st.button("Start over",
+                                    key="onboard_restart_after_done"):
+                        reset_onboarding()
+                        st.session_state.pop(KEY_LAST_PIPELINE, None)
+                        st.session_state.pop(KEY_ONBOARD_COMMITTED_ID, None)
+                        st.rerun()
+
+        # ---- Active prompt -------------------------------------
+        else:
+            prompt = st.chat_input("Type your answer or ask a question…",
+                                    key="onboard_input")
+            if prompt:
+                push_user(history, prompt)
+                accepted, reply = submit_answer(prompt)
+                push_bot(history, reply)
+                st.session_state[KEY_ONBOARD_HISTORY] = history
+                st.rerun()
+
+            _r1, _r2 = st.columns([1, 3])
+            with _r1:
+                if st.button("Start over", key="onboard_restart"):
+                    reset_onboarding()
+                    st.session_state.pop(KEY_ONBOARD_COMMITTED_ID, None)
+                    st.rerun()
+
+    with ctx_col:
+        step, total = onboarding_progress()
+        pct = int((step - 1) / total * 100) if not onboarding_complete() else 100
+        intake_label = (
+            "Plan complete" if onboarding_complete()
+            else f"Question {step} of {total}"
+        )
+        parameters = context_lines()
+        render_context_panel(
+            title="SESSION CONTEXT",
+            intake_label=intake_label,
+            intake_percent=pct,
+            parameters=parameters,
+        )

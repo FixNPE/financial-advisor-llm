@@ -18,6 +18,15 @@ _session = requests_cache.CachedSession(
     expire_after=60 * 60,  # 60 min — widened for mentored-session demo buffer
     allowable_methods=("GET",),
 )
+# Daily-series cache is separate from the quote cache: series responses are
+# large (100+ KB each), pull rarely (once a day, per proxy ETF), and would
+# otherwise flush live quote hits when the shared cache trims. 24-hour TTL
+# is enough that benchmarking stays under the 25-req/day free-tier ceiling.
+_series_session = requests_cache.CachedSession(
+    str(_CACHE_DIR / "av_series_cache"),
+    expire_after=60 * 60 * 24,
+    allowable_methods=("GET",),
+)
 _BASE = "https://www.alphavantage.co/query"
 
 
@@ -25,25 +34,33 @@ class AlphaVantageError(RuntimeError):
     pass
 
 
-def _call(params: dict) -> dict:
+def _call(params: dict, session=None) -> dict:
     params = {**params, "apikey": settings.alpha_vantage_key}
-    r = _session.get(_BASE, params=params, timeout=20)
+    sess = session if session is not None else _session
+    r = sess.get(_BASE, params=params, timeout=20)
     r.raise_for_status()
     data = r.json()
+    info_str = str(data.get("Information", ""))
+    info_lower = info_str.lower()
     rate_limited = "Note" in data or (
-        "Information" in data and "rate limit" in str(data["Information"]).lower()
+        "Information" in data and "rate limit" in info_lower
     )
-    if rate_limited or "Error Message" in data:
+    premium_gated = "Information" in data and (
+        "premium" in info_lower or "subscribe" in info_lower
+    )
+    if rate_limited or premium_gated or "Error Message" in data:
         # AV returns HTTP 200 for rate-limit/error responses, so requests-cache would
         # otherwise store them and poison the cache until TTL. Evict before raising.
         if getattr(r, "from_cache", False) is False:
             try:
-                _session.cache.delete(r.cache_key)
+                sess.cache.delete(r.cache_key)
             except Exception:  # noqa: BLE001
                 pass
         if rate_limited:
             msg = data.get("Note") or data.get("Information")
             raise AlphaVantageError(f"AV rate-limited: {msg}")
+        if premium_gated:
+            raise AlphaVantageError(f"AV premium-gated: {info_str[:200]}")
         raise AlphaVantageError(f"AV error: {data['Error Message']}")
     return data
 
@@ -60,6 +77,36 @@ def get_quote(symbol: str) -> dict:
         "volume": int(q["06. volume"]) if q.get("06. volume") else None,
         "latest_trading_day": q.get("07. latest trading day"),
     }
+
+
+def get_weekly_series(symbol: str) -> list[tuple[str, float]]:
+    """Weekly-close series (Friday closes), oldest → newest.
+
+    We use weekly rather than daily because Alpha Vantage now gates
+    ``TIME_SERIES_DAILY?outputsize=full`` behind a premium tier, while
+    ``TIME_SERIES_WEEKLY`` still returns the full ~20-year history on the free
+    plan. ~260 weekly observations over 5Y is plenty for CAGR + annualized
+    volatility (σ_weekly · √52). Cached 24h. Empty list on parse failure —
+    caller decides whether to fall back.
+    """
+    data = _call({
+        "function": "TIME_SERIES_WEEKLY",
+        "symbol": symbol.upper(),
+    }, session=_series_session)
+    ts = data.get("Weekly Time Series") or {}
+    if not ts:
+        return []
+    rows: list[tuple[str, float]] = []
+    for date_str, bar in ts.items():
+        close = bar.get("4. close")
+        if close is None:
+            continue
+        try:
+            rows.append((date_str, float(close)))
+        except (TypeError, ValueError):
+            continue
+    rows.sort(key=lambda r: r[0])
+    return rows
 
 
 def get_company_overview(symbol: str) -> dict:

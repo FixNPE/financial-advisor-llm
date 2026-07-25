@@ -15,7 +15,7 @@ from advisor.agents.orchestrator import run_pipeline  # noqa: E402
 
 from app.components.dashboard import render  # noqa: E402
 from app.components.floating_chat import render_floating_chat  # noqa: E402
-from app.components.session import KEY_LAST_PIPELINE  # noqa: E402
+from app.components.session import KEY_LAST_PIPELINE, valid_pipeline  # noqa: E402
 from app.components.theme import BRAND_NAME, apply_theme  # noqa: E402
 
 st.set_page_config(page_title=f"Dashboard · {BRAND_NAME}",
@@ -45,7 +45,7 @@ else:
     journey = _saved_journey
 
 prev = st.session_state.get(KEY_LAST_PIPELINE)
-if prev is None or prev.customer_id != customer.id or prev.journey != journey:
+if not valid_pipeline(prev, customer.id, journey):
     with st.spinner(f"Running planning pipeline for {customer.name} ({journey})..."):
         result = run_pipeline(customer, journey, customer.goal_inputs, allow_live_prices=True)
     st.session_state[KEY_LAST_PIPELINE] = result
@@ -65,6 +65,9 @@ render_floating_chat(
     page_key="Dashboard",
     page_context={
         "Journey": journey,
+        "Goal inputs (use verbatim)": (
+            ", ".join(f"{k}={v}" for k, v in _gi.items()) if _gi else None
+        ),
         "Active model": result.recommendation.active_model,
         "AI-suggested model": result.recommendation.ai_suggested,
         "Risk band": f"{result.risk.risk_band} (score {result.risk.risk_score})",
@@ -74,14 +77,14 @@ render_floating_chat(
         "Target amount (today's $)": f"${_goal.target_amount_today:,.0f}",
         "Target amount (future $)": f"${_goal.target_amount_future:,.0f}",
         "Projected amount at horizon": f"${_goal.projected_amount:,.0f}",
+        "Funding ratio": f"{_goal.funding_ratio * 100:.0f}%",
+        "Outlook": _goal.outlook,
+        "Monte-Carlo p10 / p50 / p90": (
+            f"${_goal.p10:,.0f} / ${_goal.p50:,.0f} / ${_goal.p90:,.0f}"
+        ),
         "Funding gap": f"${_goal.funding_gap:,.0f}",
         "Required monthly SIP to close gap": f"${_goal.required_monthly_sip:,.0f}",
-        "Success probability": f"{_goal.success_prob * 100:.1f}%",
-        "Monthly contribution on file": (
-            f"${_gi.get('monthly_contribution', 0):,.0f}"
-            if _gi.get("monthly_contribution") else None
-        ),
-        "Target retirement age": _gi.get("target_retirement_age"),
+        "Success probability (illustrative)": f"{_goal.success_prob * 100:.1f}%",
     },
     customer=customer,
 )

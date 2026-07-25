@@ -21,6 +21,11 @@ KEY_HITL_PENDING = "hitl_pending"             # {hitl_id, ai_suggested, journey}
 KEY_ANSWERED = "risk_answers_temp"            # in-flight questionnaire answers
 KEY_RISK_RATIONALE = "risk_rationale_cache"   # {(customer_id, answers_tuple): RiskRationale}
 
+# Chat histories — declared here so `set_active_customer` can reset them
+# without importing the chat modules (which would form an import cycle).
+KEY_FA_HISTORY = "finadvisor_history"          # main FinAdvisor page chat
+KEY_CHAT_HISTORY = "floating_chat_history"     # floating right-side panel
+
 
 def customer_options() -> list[Customer]:
     return list_customers()
@@ -43,7 +48,8 @@ def set_active_customer(customer_id: int | None) -> None:
     else:
         st.session_state[KEY_ACTIVE_CUSTOMER] = customer_id
     for k in (KEY_LAST_PIPELINE, KEY_LAST_ADVISOR_TURN, KEY_HITL_PENDING,
-                KEY_ANSWERED, KEY_RISK_RATIONALE):
+                KEY_ANSWERED, KEY_RISK_RATIONALE,
+                KEY_FA_HISTORY, KEY_CHAT_HISTORY):
         st.session_state.pop(k, None)
 
 
@@ -53,6 +59,29 @@ def provider_label() -> str:
     return f"LLM: {settings.llm_provider} · {settings.llm_model_id.split('/')[-1]}"
 
 
+# Fields added to GoalPlan in the funding-ratio / Monte-Carlo overhaul.
+# A pipeline result cached in st.session_state before that change lacks
+# them and would AttributeError when the UI reads them. Bumping this
+# tuple whenever we add new required fields lets us invalidate stale
+# cached results in one place instead of scattering ``hasattr`` checks
+# across every page.
+_GOAL_REQUIRED_ATTRS = ("funding_ratio", "p10", "p50", "p90", "outlook")
+
+
+def valid_pipeline(prev, customer_id: int, journey: str) -> bool:
+    """True if ``prev`` matches the active customer/journey AND has the
+    current GoalPlan shape. Stale entries return False so the caller re-runs.
+    """
+    if prev is None:
+        return False
+    if prev.customer_id != customer_id or prev.journey != journey:
+        return False
+    goal = getattr(prev, "goal", None)
+    if goal is None:
+        return False
+    return all(hasattr(goal, attr) for attr in _GOAL_REQUIRED_ATTRS)
+
+
 def profile_dict_for_prompt(customer: Customer | None) -> dict | None:
     if not customer:
         return None
@@ -60,10 +89,17 @@ def profile_dict_for_prompt(customer: Customer | None) -> dict | None:
         ", ".join(f"{h.ticker}({h.units:.0f})" for h in customer.holdings)
         if customer.holdings else "none"
     )
+    # Prefer the deterministic risk band from the last pipeline run; fall
+    # back to "unspecified" so we never mis-label the goal as a tolerance.
+    prev = st.session_state.get(KEY_LAST_PIPELINE)
+    risk_tolerance = "unspecified"
+    if prev and prev.customer_id == customer.id:
+        risk_tolerance = prev.risk.risk_band.lower()
     return {
         "age": customer.age,
-        "risk_tolerance": customer.primary_goal or "unspecified",
+        "risk_tolerance": risk_tolerance,
         "income": customer.annual_income,
         "goals": [customer.primary_goal] if customer.primary_goal else [],
+        "goal_inputs": customer.goal_inputs or {},
         "holdings": holdings_summary,
     }

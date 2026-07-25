@@ -29,63 +29,110 @@ def retirement_projection(
     }
 
 
-def plan_journey(
-    journey: str,
-    risk_band: str,
-    inputs: dict,
-) -> dict:
-    """Run the same GoalPlan the pipeline runs, so the chat can recompute
-    projections + success probability under a specified risk_band using the
-    canonical MODEL_ASSUMPTIONS.
-
-    journey: "Retirement Planning" | "Child Education" | "Buy Home"
-    risk_band: "Moderate" | "Growth" | "Aggressive"
-    inputs: journey-specific dict — see keys below.
-
-    Retirement Planning:
-        current_age, target_retirement_age, desired_monthly_income,
-        current_savings, monthly_contribution
-    Child Education:
-        child_current_age, target_cost_today, current_savings,
-        monthly_contribution, start_college_age (optional, default 18)
-    Buy Home:
-        home_price, down_payment_pct, target_purchase_year,
-        current_year, current_savings, monthly_saving_capacity
-    """
-    # Local imports so this module stays leaf-level (no cycles).
-    from advisor.agents.goal_agent import (
-        plan_buy_home, plan_child_education, plan_retirement,
-    )
+def _plan_to_dict(plan, risk_band: str) -> dict:
+    """Shared serialiser for plan_* results."""
     from advisor.domain.models import MODEL_ASSUMPTIONS
-
-    if risk_band not in MODEL_ASSUMPTIONS:
-        return {"error": f"risk_band must be one of {list(MODEL_ASSUMPTIONS)}"}
-    assumptions = MODEL_ASSUMPTIONS[risk_band]
-    try:
-        if journey == "Retirement Planning":
-            plan = plan_retirement(risk_band=risk_band, **inputs)
-        elif journey == "Child Education":
-            plan = plan_child_education(risk_band=risk_band, **inputs)
-        elif journey == "Buy Home":
-            plan = plan_buy_home(risk_band=risk_band, **inputs)
-        else:
-            return {"error": f"unknown journey: {journey!r}"}
-    except TypeError as e:
-        return {"error": f"bad inputs for {journey}: {e}"}
+    a = MODEL_ASSUMPTIONS[risk_band]
     return {
         "journey": plan.journey,
         "risk_band": risk_band,
-        "expected_return": assumptions["expected_return"],
-        "volatility": assumptions["volatility"],
+        "expected_return": a["expected_return"],
+        "volatility": a["volatility"],
         "years": plan.years,
         "target_amount_today": plan.target_amount_today,
         "target_amount_future": plan.target_amount_future,
         "projected_amount": plan.projected_amount,
         "funding_gap": plan.funding_gap,
+        "funding_ratio": plan.funding_ratio,
         "required_monthly_sip": plan.required_monthly_sip,
         "success_prob": plan.success_prob,
+        "p10": plan.p10,
+        "p50": plan.p50,
+        "p90": plan.p90,
+        "outlook": plan.outlook,
         "assumed_annual_return": plan.assumed_annual_return,
     }
+
+
+def _validate_band(risk_band: str) -> str | None:
+    from advisor.domain.models import MODEL_ASSUMPTIONS
+    if risk_band not in MODEL_ASSUMPTIONS:
+        return f"risk_band must be one of {list(MODEL_ASSUMPTIONS)}"
+    return None
+
+
+def plan_retirement(
+    current_age: int,
+    target_retirement_age: int,
+    desired_monthly_income: float,
+    current_savings: float,
+    monthly_contribution: float,
+    risk_band: str,
+) -> dict:
+    """Recompute the retirement plan (target, projection, SIP, funding ratio)."""
+    from advisor.agents.goal_agent import plan_retirement as _plan
+    err = _validate_band(risk_band)
+    if err:
+        return {"error": err}
+    plan = _plan(
+        current_age=current_age,
+        target_retirement_age=target_retirement_age,
+        desired_monthly_income=desired_monthly_income,
+        current_savings=current_savings,
+        monthly_contribution=monthly_contribution,
+        risk_band=risk_band,
+    )
+    return _plan_to_dict(plan, risk_band)
+
+
+def plan_education(
+    child_current_age: int,
+    target_cost_today: float,
+    current_savings: float,
+    monthly_contribution: float,
+    risk_band: str,
+    start_college_age: int = 18,
+) -> dict:
+    """Recompute the child-education plan (target, projection, SIP, funding ratio)."""
+    from advisor.agents.goal_agent import plan_child_education as _plan
+    err = _validate_band(risk_band)
+    if err:
+        return {"error": err}
+    plan = _plan(
+        child_current_age=child_current_age,
+        target_cost_today=target_cost_today,
+        current_savings=current_savings,
+        monthly_contribution=monthly_contribution,
+        risk_band=risk_band,
+        start_college_age=start_college_age,
+    )
+    return _plan_to_dict(plan, risk_band)
+
+
+def plan_home(
+    home_price: float,
+    down_payment_pct: float,
+    target_purchase_year: int,
+    current_year: int,
+    current_savings: float,
+    monthly_saving_capacity: float,
+    risk_band: str,
+) -> dict:
+    """Recompute the home-purchase plan (target, projection, SIP, funding ratio)."""
+    from advisor.agents.goal_agent import plan_buy_home as _plan
+    err = _validate_band(risk_band)
+    if err:
+        return {"error": err}
+    plan = _plan(
+        home_price=home_price,
+        down_payment_pct=down_payment_pct,
+        target_purchase_year=target_purchase_year,
+        current_year=current_year,
+        current_savings=current_savings,
+        monthly_saving_capacity=monthly_saving_capacity,
+        risk_band=risk_band,
+    )
+    return _plan_to_dict(plan, risk_band)
 
 
 def savings_goal(target: float, years: int, annual_return: float = 0.05) -> dict:

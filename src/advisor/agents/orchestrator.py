@@ -42,6 +42,7 @@ from advisor.domain.data import (
     Customer, latest_committed_for_journey, log_agent_run, open_hitl_review,
 )
 from advisor.domain.risk import RiskResult
+from advisor.llm.client import last_error as llm_last_error
 
 
 AGENTS_RUN = ["risk", "risk_narrate", "goal", "portfolio", "benchmark",
@@ -142,9 +143,13 @@ def run_pipeline(customer: Customer, journey: str, goal_inputs: dict,
     # Never raises: falls back to a deterministic template if the LLM is off.
     risk_rationale = narrate_risk(customer, risk, answer_points_used)
     if risk_rationale.source != "llm":
+        detail = f"source={risk_rationale.source}"
+        if risk_rationale.source == "llm_error_fallback":
+            reason = llm_last_error()
+            if reason:
+                detail += f", reason={reason}"
         warnings.append(
-            f"Risk-band rationale used the deterministic template "
-            f"(source={risk_rationale.source})."
+            f"Risk-band rationale used the deterministic template ({detail})."
         )
 
     # 3. Goal
@@ -161,7 +166,12 @@ def run_pipeline(customer: Customer, journey: str, goal_inputs: dict,
         warnings.append(f"No price data for: {', '.join(missing)} — using buy price as proxy.")
 
     # 5. Benchmark
-    benchmark = run_benchmarking(model_name)
+    benchmark = run_benchmarking(model_name, allow_live=allow_live_prices)
+    if benchmark.benchmark_source != "live_5y":
+        warnings.append(
+            f"Benchmark {benchmark.proxy_ticker} used illustrative long-run "
+            f"return — live 5Y series unavailable."
+        )
 
     # 6. Recommend
     current_pct = portfolio.allocation_pct or {}
@@ -172,9 +182,13 @@ def run_pipeline(customer: Customer, journey: str, goal_inputs: dict,
     rationale = narrate_recommendation(customer, journey, risk, goal, portfolio,
                                           benchmark, recommendation)
     if rationale.source != "llm":
+        detail = f"source={rationale.source}"
+        if rationale.source == "llm_error_fallback":
+            reason = llm_last_error()
+            if reason:
+                detail += f", reason={reason}"
         warnings.append(
-            f"Recommendation rationale used the deterministic template "
-            f"(source={rationale.source})."
+            f"Recommendation rationale used the deterministic template ({detail})."
         )
 
     # 8. Summary + persist

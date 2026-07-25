@@ -67,7 +67,7 @@ flowchart LR
    recommendation and report for one of three planning journeys (Retirement / Child
    Education / Buy Home).
 2. **Grounded Q&A (ReAct)** — the advisor agent runs a Reason → Act → Observe loop
-   over 12 tools (Alpha Vantage market data + deterministic financial calculators)
+   over 14 tools (Alpha Vantage market data + deterministic financial calculators)
    plus RAG snippets, answering open-ended finance questions with inline citations and
    a tool-call audit trail.
 
@@ -136,7 +136,7 @@ directly (it goes through `advisor.domain.data` or the agents).
 financial-advisor-llm/
 ├── .env                          # secrets, gitignored (HF_TOKEN, ALPHA_VANTAGE_KEY)
 ├── .env.example                  # placeholders only, committed
-├── .streamlit/config.toml        # NexWealth AI theme (coral primary, navy sidebar)
+├── .streamlit/config.toml        # NexWealth AI theme + fileWatcherType="poll" (silences transformers/torchvision watcher noise)
 ├── Makefile                      # setup / index / prices / seed / run / eval / test / clean
 ├── README.md                     # setup + run guide (start here)
 ├── ARCHITECTURE.md               # this file
@@ -147,16 +147,22 @@ financial-advisor-llm/
 ├── app/                                       # Streamlit UI
 │   ├── streamlit_app.py                       # entry — applies theme, bounces to Home
 │   ├── components/
-│   │   ├── theme.py                           # apply_theme() + CSS for FAB / docked panel
+│   │   ├── theme.py                           # apply_theme() + CSS (FAB, docked panel,
+│   │   │                                      #   scrollable chat frames)
 │   │   ├── session.py                         # KEY_* constants + active_customer()
+│   │   │                                      #   (also owns KEY_FA_HISTORY /
+│   │   │                                      #   KEY_CHAT_HISTORY reset on customer swap)
 │   │   ├── charts.py                          # Plotly primitives (donut, bars, gauge)
 │   │   ├── dashboard.py                       # shared dashboard block (Dashboard + Report)
+│   │   ├── chat_ui.py                         # shared chat renderer (bubbles + right rail)
+│   │   ├── onboarding.py                      # new-user chat-driven intake (goal-aware)
+│   │   ├── goal_setup.py                      # mini-onboarding (existing user, new goal)
 │   │   └── floating_chat.py                   # FAB + docked chat panel + change flow
 │   └── pages/
-│       ├── 0_Home.py                          # customer picker + onboarding
-│       ├── 1_FinAdvisor.py                    # full-page chat (also the FAB target)
+│       ├── 0_Home.py                          # customer picker + chat onboarding (new users)
+│       ├── 1_FinAdvisor.py                    # pure chat + right-side session context rail
 │       ├── 2_Dashboard.py                     # per-customer plan view
-│       ├── 3_Risk_Profile.py                  # 5-question risk questionnaire + goal inputs
+│       ├── 3_Risk_Profile.py                  # read-only band summary + on-demand rationale
 │       ├── 4_Recommendations.py               # 3 options + HITL Approve/Reject/Override
 │       └── 5_Report.py                        # dashboard block + downloadable markdown
 │
@@ -172,7 +178,7 @@ financial-advisor-llm/
 │   │   ├── risk_narrator.py                   # grounded LLM rationale (2nd step)
 │   │   ├── goal_agent.py                      # retirement / education / home planners
 │   │   ├── portfolio_agent.py                 # allocation, drift, live prices
-│   │   ├── benchmark_agent.py                 # expected return / vol vs model
+│   │   ├── benchmark_agent.py                 # live 5Y CAGR vs proxy ETF (AOM/AOR/AOA)
 │   │   ├── recommend_agent.py                 # 3 options + HITL overrides
 │   │   ├── recommendation_narrator.py         # grounded LLM rationale (7th step)
 │   │   └── report_agent.py                    # markdown report + summary JSON
@@ -183,7 +189,7 @@ financial-advisor-llm/
 │   │   ├── risk.py                            # RiskResult + banding rules
 │   │   ├── calculators.py                     # FV, PMT, education, home
 │   │   ├── recommend.py                       # allocation → target %; fit_score
-│   │   └── benchmark.py                       # expected return / volatility math
+│   │   └── benchmark.py                       # proxy ETF registry + live CAGR/vol from AV weekly closes
 │   ├── rag/
 │   │   ├── ingest.py                          # chunk corpus/ → Chroma + BM25
 │   │   ├── retrieve.py                        # HybridRetriever (RRF-fused)
@@ -246,21 +252,94 @@ financial-advisor-llm/
 - `apply_theme(page_key)` — renders the sidebar (customer chip, in-app nav,
   agent-pipeline block, LLM-status footer) and injects the shared CSS. Returns the
   active `Customer` or `None`.
-- `_CSS` — includes rules for the docked chat panel:
+- `_CSS` — includes rules for the docked chat panel and scrollable chat frames:
   - `.st-key-nw_fab` → `position: fixed; right: 28px; bottom: 28px; z-index: 9999`
   - `.st-key-nw_chat_panel` → `position: fixed; top: 72px; right: 24px; bottom: 24px; width: 440px`
   - `section[data-testid="stMain"]:has(.st-key-nw_chat_panel) div[data-testid="stMainBlockContainer"] { padding-right: 480px }` shifts the page left when the panel is open so nothing is hidden behind it.
   - `.st-key-nw_chat_close` → absolute-positioned in the panel's top-right corner.
+  - `.st-key-nw_chat_scroll` (main-page chat) → `max-height: 65vh; overflow-y: auto` — pins the chat history to a fixed frame so a long conversation is scrollable and the input row stays anchored below. `render_history` also injects a small `components.html` snippet after the bubbles that reaches into `window.parent.document`, finds this element, and sets `scrollTop = scrollHeight` so the newest turn is always in view without the user having to scroll. Turn count is folded into the JS so Streamlit hands us a fresh iframe every rerun.
+  - `.st-key-nw_chat_scroll_fc` (floating panel chat) → same but `max-height: 50vh` since the panel itself is already a smaller frame.
+  - `.nw-chat-user` / `.nw-chat-user-bubble` — user bubble class + inner style: `justify-content: flex-end` on the outer flex row, filled blue bubble (`--nw-blue`) with a right-tail radius on the inner. Renders as a right-aligned chat bubble mirroring standard chat conventions. Bot turns still use `st.chat_message("assistant")` and get a soft card bubble on the left via `[data-testid="stChatMessage"] [data-testid="stChatMessageContent"]`. Chat bubble alignment is decoupled from Streamlit's internal chat DOM (which shifts version to version) — see `chat_ui.py` below.
 
   Streamlit auto-generates the `st-key-<key>` class on any keyed widget's wrapper —
-  this is the hook we exploit to fix-position them.
+  this is the hook we exploit to fix-position and size them.
 
 **`app/components/session.py`** — shared session_state keys and helpers:
 
-- `KEY_ACTIVE_CUSTOMER_ID`, `KEY_LAST_PIPELINE`, `KEY_HITL_PENDING`
+- `KEY_ACTIVE_CUSTOMER`, `KEY_LAST_PIPELINE`, `KEY_HITL_PENDING`, `KEY_ANSWERED`, `KEY_RISK_RATIONALE`
+- `KEY_FA_HISTORY`, `KEY_CHAT_HISTORY` — chat histories are declared here (not in the pages/components that use them) so `set_active_customer()` can reset them alongside the pipeline cache without importing the chat modules (would form an import cycle).
+- `set_active_customer(id)` — pops all of the above so a customer swap doesn't leak the previous customer's plan or greeting into the new session.
 - `active_customer()` → resolves the sidebar-selected customer from the DB.
 - `profile_dict_for_prompt(customer)` → shapes the customer profile as a
-  short-form dict the LLM prompt template consumes.
+  short-form dict the LLM prompt template consumes. Includes the deterministic
+  `risk_tolerance` (read from the last `PipelineResult`'s `risk_band`, lower-cased) +
+  `goals` + `goal_inputs` so the persona block reflects the real plan shape.
+
+**`app/components/chat_ui.py`** — UI-only shared chat helpers:
+
+- `render_history(history, scroll_key="nw_chat_scroll")` — replays a role/content
+  list of chat bubbles inside a keyed container so the CSS scroll frame applies. The
+  floating panel passes `scroll_key="nw_chat_scroll_fc"` to pick up the shorter
+  variant. Rendering is **per-role**:
+  - bot turns → `st.chat_message("assistant")` + `st.markdown(content)` (left-aligned card bubble).
+  - user turns → a plain HTML `.nw-chat-user` wrapper with the escaped content in `.nw-chat-user-bubble` (right-aligned blue bubble). User text is passed through `_escape_and_break` — HTML-escaped and `\n` → `<br>` — so raw chat content can't inject markup. Rendering the user bubble ourselves (instead of via `st.chat_message("user")`) decouples alignment from Streamlit's internal chat DOM, which changes across versions.
+  - After every replay, a `components.html` block runs `el.scrollTop = el.scrollHeight` against `window.parent.document.querySelector('.st-key-<scroll_key>')` so the newest turn is always in view. Turn count is folded into the JS body to force a fresh iframe on every rerun.
+- `render_context_panel(title, intake_label, intake_percent, parameters, api_trace)` —
+  the right-side session-context rail (INTAKE PROGRESS bar + CURRENT PARAMETERS list
+  + optional API TRACE) used by Home + FinAdvisor.
+- `push_bot(history, content)` / `push_user(history, content)` — role-tagged append
+  helpers used by every chat surface so the two roles stay consistent.
+
+**`app/components/onboarding.py`** — goal-aware new-user intake. Three phases composed dynamically:
+
+1. **Intro (4 Qs)** — name, age, monthly income (USD), `goal_type` — where `goal_type` classifies into `Retirement Planning`, `Child Education`, or `Buy Home`.
+2. **Branch** — journey-specific follow-ups from `_BRANCH` (retire_age + monthly_need for Retirement, child_current_age + target_cost_today for Education, home_price + down_payment_pct + target_purchase_year for Buy Home).
+3. **Tail (3 Qs)** — savings (freetext + parsed dollar amount if present), health, `risk_confirm` (4 options: hold / partial / move / **buy more** — the last one added because without it a new user's tolerance couldn't cross the Aggressive threshold; see §7-note below).
+
+`_current_questions()` reads the *current* `goal_type` from state and composes the active list on every rerun — the total-question count grows once the user picks a goal, and `step` stays a simple int index into the composed list.
+
+**Currency — USD-only.** The app targets the US market. `_extract_money` recognises only `k` / `m` suffixes and a `$` prefix — no `lakh` / `crore` / `₹` (a prior version accepted those, which caused a home-price answer of `25 Cr` to be stored as $250M and produce a $144M target future value). `_display_money` always renders `$X,XXX`. Question prompts and error messages exclusively cite USD examples; the tail `savings` question mentions 401(k) / IRA / brokerage (not EPF); `risk_confirm` option (c) is "high-yield savings or Treasury bills" (not "fixed deposits"). `_classify_risk_confirm` maps a/b/c/d → 5-element `answer_points` arrays fed into `compute_risk`: `d=[3,3,3,3,3]` (Aggressive), `a=[2]*5` (Growth-ish), `b=[1]*5` (Moderate), `c=[0]*5` (Moderate). Without option (d) — the fix to a real defect — a new user's max composite score capped at ~67 and Aggressive was unreachable.
+
+Answer extraction is entirely regex — no LLM required for onboarding so it always works even when `LLM_PROVIDER=none`:
+
+- `_extract_name` strips common lead-ins ("I am", "I'm", "My name is", "Hi, I am", "It's", "Call me", "This is") **then keeps only the leading 1-4 capitalised proper-noun tokens** (via `_NAME_TOKEN_RE`) so a message like `"I am Peter Parker, 35 year old male."` yields `Peter Parker`, not the whole sentence. Lowercase input (`"peter parker"`) is auto-title-cased first so the token regex still catches it.
+- `_extract_money` parses `80000`, `80,000`, `$5,000`, `5k`, `1.2m` (USD).
+- `_extract_money_from_freetext` — looser variant that scans a sentence for a dollar-marked or `k`/`m`-suffixed value. Used to pull a numeric `current_savings` out of the tail `savings` freetext (`"I have $100,000 in a brokerage"` → `100000`); falls back to per-journey defaults if no number is present.
+- `_extract_year` accepts absolute (`2029`) or relative (`in 4 years`, `4`).
+- `_extract_goal` maps `"1"/"2"/"3"` or free-text keywords into the three journey labels.
+
+**Opportunistic multi-field pickup.** A user is not forced to answer one field per turn. `_sniff_field(key, raw)` looks at any answer and returns a value for `key` **only when the surrounding text contains a context word for that field** — this is the piece that lets one message fill several turns at once without misclassifying unrelated numbers:
+
+| Field | Context words required |
+|---|---|
+| `age` | `years old` / `yo` / `y/o` / `year-old` |
+| `income` | `month` / `salary` / `earn` / `take-home` / `paycheck` |
+| `retire_age` | `retire` / `retirement` / `pension` (extra shape: `retire at 60`) |
+| `monthly_need` | `retire`… (**and** the money value must appear *after* the retirement word, so a stated current income isn't mis-labelled as retirement need) |
+| `home_price` | `home` / `house` / `property` / `apartment` / `condo` |
+| `down_payment_pct` | `down` / `downpayment` + `%` |
+| `target_purchase_year` | `20xx` or `in N years` |
+| `child_current_age` | `child` / `kid` / `son` / `daughter` |
+| `target_cost_today` | `college` / `tuition` / `education` |
+| `goal_type` | any goal keyword (reuses `_extract_goal`) |
+
+Freetext fields (`savings`, `health`, `risk_confirm`) are intentionally absent from the sniffer table — they must be answered by their own turn.
+
+`_opportunistic_sweep(current_key, raw, state)` runs after every successful primary answer and calls `_sniff_field` for every remaining question in the currently-composed list (intro + branch + tail). Non-None hits are written into state, then `_advance_past_prefilled` skips forward past every question whose key is already filled. So a first-turn reply like `"I am Peter Parker, 35, I make $8,000/month and want to retire at 60 on $6k/month"` populates `name`, `age`, `income`, `goal_type=Retirement Planning`, `retire_age=60`, `monthly_need=$6k` in one shot — the bot jumps straight from question 1 to the tail questions.
+
+**Noise tolerance.** `submit_answer` tries the strict extractor first; if that returns None, it falls back to `_sniff_field(q.key, raw)` so a noisy answer like `"she's 5 by the way, starting kindergarten next year"` is still accepted for the child-age question. Strict extractors (`_extract_int`, `_extract_money`, `_extract_year`) also grab the *first* plausible token, which already handles the common "irrelevant text around a clean number" case.
+
+Public helpers exposed for the mismatch guard + mini-onboarding flow:
+
+- `REQUIRED_GOAL_INPUTS: dict[journey, tuple[key, ...]]` — the required keys per journey.
+- `missing_goal_input_fields(journey, goal_inputs) → list[str]` — the required keys not yet present. Used by both chat surfaces to detect a mismatch between a user's question and their actual `goal_inputs` shape.
+- `branch_questions(journey) → list[OnboardQ]` — exposes the branch-only prompt list so `goal_setup` can reuse the exact same wording and extractors as the full onboarding.
+
+**`app/components/goal_setup.py`** — mini-onboarding for an **existing** customer adding a new goal. When someone with a Retirement profile asks about buying a home, the chat handler offers to walk through only the branch questions (`home_price` / `down_payment_pct` / `target_purchase_year`) instead of the full 8-Q flow.
+
+- State keyed by `KEY_GS_JOURNEY` / `KEY_GS_STATE` / `KEY_GS_STEP`.
+- `start(journey) → first_prompt` / `submit_answer(raw) → (accepted, message, complete)` / `commit(customer)` / `cancel()` / `is_active()` / `active_journey()`.
+- `commit(customer)` merges the collected branch fields into `customer.goal_inputs` (with sensible defaults for the tail-only fields — `current_savings`, `monthly_contribution`/`monthly_saving_capacity`), sets `customer.primary_goal = journey`, calls `upsert_customer`, pops `KEY_LAST_PIPELINE` so the next render reruns the pipeline against the new goal shape, and calls `cancel()`.
 
 **`app/components/charts.py`** — Plotly building blocks used by the dashboard block:
 projection line, allocation donut, current-vs-target bars, risk gauge.
@@ -275,14 +354,25 @@ dashboard block reused by both **Dashboard** and **Report** pages.
   opens the panel.
 - **Open** — a keyed bordered container (`key="nw_chat_panel"`) renders the panel;
   CSS fixes it to the right side of the viewport. Inside: header, "What I can see"
-  expander (dumps `page_context`), chat history, pending-confirmation card (if a
-  change is queued), `st.chat_input`, footer buttons.
+  expander (dumps `page_context`), scroll-framed chat history (`nw_chat_scroll_fc`),
+  pending-confirmation card (if a change is queued), pending-goal-setup card (if a
+  mismatch was detected), `st.chat_input`, footer buttons.
 
-The panel is grounded via a `page_context: dict` each page passes in. The chat first
-tries `propose_change(prompt, ...)` — if that returns a `ProposedChange`, we show a
-confirmation card; on Apply, `_commit_change()` mutates the customer via
-`upsert_customer`, pops the cached pipeline, and switches to the most relevant page.
-Otherwise we fall through to `answer_question()` (RAG Q&A).
+The panel is grounded via a `page_context: dict` each page passes in. Every user turn
+is routed in order:
+
+1. `propose_change(prompt, ...)` — if a change intent matches, render a
+   confirmation card. On Apply, `_commit_change()` mutates the customer via
+   `upsert_customer`, pops the cached pipeline, and switches to the most relevant page.
+2. `classify_intent(prompt)` — if `OUT_OF_SCOPE`, echo `OUT_OF_SCOPE_MESSAGE`.
+3. **Mismatch guard** — if the intent classifier picked a planning journey and
+   `missing_goal_input_fields(intent.journey, customer.goal_inputs)` is non-empty,
+   stash the target journey in `KEY_CHAT_PENDING_SETUP` and render a "Set up X /
+   Not now" card. Because the panel closes on `st.switch_page`, "Set up X" writes
+   the target journey into `KEY_FA_PENDING_SETUP` (the full-page FinAdvisor's session
+   key) and redirects to `pages/1_FinAdvisor.py` — the full-page chat then owns the
+   multi-turn mini-onboarding flow.
+4. Fall through to `answer_question()` (grounded ReAct or grounded fallback).
 
 The chat renders on every page **except** `1_FinAdvisor` (that page *is* the chat).
 
@@ -290,10 +380,10 @@ The chat renders on every page **except** `1_FinAdvisor` (that page *is* the cha
 
 | Page | Purpose |
 |---|---|
-| `0_Home.py` | Customer picker (hero cards + quick-start pills) or new-customer onboarding. |
-| `1_FinAdvisor.py` | Full-page chat with intent classification and journey routing. |
+| `0_Home.py` | Two-mode surface: **Existing** — search + selectbox of seeded customers + Load. **New** — chat-driven onboarding (`components/onboarding.py`). The hero title is derived dynamically from `onboard_state["goal_type"]` — it reads "Financial planning — new user onboarding" until the user answers the goal question, then flips to "Retirement Planning" / "Child Education" / "Buy Home", so we never imply a bias toward one journey. On completion, runs the pipeline via `commit_customer_and_run` + `run_pipeline` and renders inline metric tiles + priority recommendations before the user opens the Dashboard. The one-time commit is gated by a per-onboarding `KEY_ONBOARD_COMMITTED_ID` flag (not the pipeline cache) so a stale `KEY_LAST_PIPELINE` from a prior existing-user session doesn't skip the commit. |
+| `1_FinAdvisor.py` | Pure chat + right-side session-context rail. Lazily runs `run_pipeline` on load if the active customer has a `primary_goal` + `goal_inputs` but the cached `KEY_LAST_PIPELINE` is missing or belongs to a different customer/journey — this populates the PAGE FACTS dict fed to the ReAct advisor. Handler routes: mini-onboarding turn (if `goal_setup.is_active()`) → `propose_change` → `OUT_OF_SCOPE` → mismatch guard → `answer_question`. Hero title derives from `customer.primary_goal` (no more hardcoded "Retirement planning"). |
 | `2_Dashboard.py` | For the active customer: risk band, goal projection, allocation, benchmark, holdings, HITL log. Runs the pipeline if not cached. |
-| `3_Risk_Profile.py` | 5-question tolerance/capacity questionnaire + journey-specific goal inputs. Includes an on-demand "Explain this band" narrator that renders the grounded LLM rationale in a bordered card (source badge indicates `llm` / `template` / `llm_error_fallback`). Persists to the customer row. |
+| `3_Risk_Profile.py` | **Read-only** band summary + on-demand rationale. The 5-question questionnaire and goal-inputs form are gone — risk is inferred from the single `risk_confirm` question during onboarding, and goal inputs are edited via the FinAdvisor chat. Renders the deterministic band from the customer's stored `risk_answers` plus an "Explain this band" button that pulls the grounded LLM rationale from `narrate_risk` (source badge `llm` / `template` / `llm_error_fallback`). |
 | `4_Recommendations.py` | 3 investment options centered on the AI-suggested risk band, with the grounded LLM rationale rendered above the option cards (source badge indicates `llm` / `template` / `llm_error_fallback`). HITL: Approve / Reject / Override (different model or custom allocation). Commits the HITL row. |
 | `5_Report.py` | Dashboard block + full markdown report; downloadable `.md`. Refreshes markdown if a HITL decision was committed after the pipeline ran. |
 
@@ -354,16 +444,18 @@ Returns a `ProposedChange(kind, field, new_value, old_value, label, reason)` or
 
 Deliberately **not** an LLM call — the chat still works when `LLM_PROVIDER=none`.
 
-**`advisor.py`** — the ReAct Q&A path. `answer_question(prompt, profile, k=6)` runs a
+**`advisor.py`** — the ReAct Q&A path. `answer_question(prompt, profile, page_facts, k=6)` runs a
 Reason → Act → Observe loop:
 
 1. **Retrieve** — `HybridRetriever.search(prompt, k)` returns top-k RAG snippets
    (BM25 + Chroma dense, RRF-fused). Those are embedded in the system prompt as
    grounded context.
-2. **Prompt** — `_react_system_prompt(profile, rag_block)` extends
+2. **Prompt** — `_react_system_prompt(profile, page_facts, rag_block)` extends
    `build_system_prompt` (persona + retrieved context) with ReAct-specific
    instructions: *call a tool rather than guess a number, chain tool calls when
-   needed, cite `[Tool: <name>]` inline*.
+   needed, cite `[Tool: <name>]` inline*. The `page_facts` dict (the numbers
+   already on the user's screen) is embedded verbatim under a `## PAGE FACTS`
+   heading so the LLM is told to prefer those over recomputation.
 3. **Loop** — up to `MAX_REACT_STEPS = 6` iterations. Each iteration calls
    `llm.client.chat(messages, tools=TOOLS)`. If the response has `tool_calls`, we
    dispatch each via `DISPATCH` in `tools/registry.py`, capture a
@@ -381,21 +473,69 @@ was_blocked, provider, steps, stopped_reason)`. Both chat surfaces (the
 `1_FinAdvisor` page and the docked panel) render the `tool_calls` list in an
 expander so the user can see what the agent consulted.
 
-**Fallback** — when `LLM_PROVIDER=none`, `HF_TOKEN` is empty, or the LLM turn errors
-out after retries, `_fallback_answer` returns a snippet-echo built from the top-3
-RAG hits so the demo path always renders something. `stopped_reason` becomes
-`"no_llm"` or `"llm_error"`.
+**Grounded fallback** — when `LLM_PROVIDER=none`, `HF_TOKEN` is empty, or the LLM
+turn errors after retries, `_fallback_answer(question, snippets, profile, page_facts, reason)`
+returns a fully-formed markdown reply grounded in the user's plan rather than a
+generic snippet echo:
 
-The 12 tools registered in `tools/registry.py`:
+- `_fallback_banner(reason)` prepends a small italicised note explaining
+  *why* the LLM is out of the loop. For `no_llm` it says the provider is
+  disabled; for `llm_error` it pulls the classified reason from
+  `advisor.llm.client.last_error()` and splices it into the banner
+  (e.g. *"LLM unavailable — HF token rejected (401) — check HF_TOKEN in .env.
+  Showing grounded numbers…"*). The classification lives in
+  `_classify_error(exc)` in `llm/client.py` and maps 401/402/403/404/429/
+  timeout/connection failures to human labels — every failed `chat()` call
+  sets `_last_error` before re-raising, and a subsequent successful call
+  clears it, so the banner reason always tracks the most recent state.
+  The banner sets user expectations without hiding the mode from them, and
+  gives the operator enough signal to distinguish "credits exhausted" from
+  "wrong model route" from "typo in the .env token" without reading logs.
+- `_format_plan_lines(page_facts)` pulls the numbers that are already on the
+  user's screen (goal-plan target, monthly SIP, success probability, current
+  allocation, benchmark CAGR) and renders them as `• Label: value` bullets.
+- `_format_profile_lines(profile)` adds the customer's own inputs (age, income,
+  risk band, journey, filled goal inputs) as a second bullet block — this gives
+  the reply a specific, grounded framing even when the plan snapshot is missing
+  (e.g. onboarding-just-completed with no cached pipeline yet).
+- The top-3 RAG snippets are appended at the bottom as *reference reading*, not
+  as the answer body — so the reply always leads with the user's own plan
+  numbers, and citations remain visible for follow-up.
+
+`stopped_reason` remains `"no_llm"` or `"llm_error"` for observability so the
+report + agent-runs summary can still distinguish "the LLM was intentionally
+disabled" from "the LLM call failed at inference time".
+
+This was rebuilt in response to a demo-day failure mode: the HuggingFace
+Inference Providers monthly credit ran out mid-session, every ReAct call
+returned 402, and the old fallback echoed unrelated IRS RAG snippets for a
+question like *"how much should I set aside for my child's education?"* — the
+customer's own goal plan was ignored. The grounded fallback now surfaces that
+plan even when the LLM path is dead.
+
+The 14 tools registered in `tools/registry.py`:
 
 | Category | Tools |
 |---|---|
 | Market data (Alpha Vantage, cached) | `get_stock_quote`, `get_company_overview`, `get_news_sentiment`, `get_technical_indicator`, `get_sector_performance`, `get_fx_rate` |
-| Calculators (deterministic) | `retirement_projection`, `plan_journey`, `savings_goal`, `asset_allocation`, `debt_payoff`, `emergency_fund` |
+| Calculators (deterministic) | `retirement_projection`, `plan_retirement`, `plan_education`, `plan_home`, `savings_goal`, `asset_allocation`, `debt_payoff`, `emergency_fund` |
 
 Tool results are JSON-serialised and truncated at 4KB before being fed back to the
 model so the context window doesn't blow up on `get_news_sentiment` or a technical
 indicator series.
+
+**Journey planners are three separate tools, not one.** Previously we exposed a
+single `plan_journey(journey, risk_band, inputs)` with `inputs` typed as a bare
+`object` — the LLM freely invented values inside that dict (e.g. bumping
+`monthly_contribution` from 700 to 1000, or replacing the customer's
+$180k `target_cost_today` with a $430k guess) because the JSON Schema didn't
+declare the fields. The three replacements (`plan_retirement`,
+`plan_education`, `plan_home`) each have explicit typed `properties` and a
+`required` list, so the tool call fails validation if the LLM tries to omit
+or hallucinate a field. Combined with the "**Goal inputs (use verbatim)**"
+line in PAGE FACTS and the plan-lookup rule in the ReAct system prompt, this
+closes the loop where the chat was reporting numbers that disagreed with the
+Goal Plan tab for the same customer.
 
 **`risk_narrator.py`** — grounded LLM rationale layered over the finished
 `RiskResult`. `narrate_risk(customer, risk, answer_points)` returns
@@ -464,13 +604,43 @@ risk_band, capacity_notes)`.
 - `plan_child_education(child_current_age, target_cost_today, current_savings, monthly_contribution, risk_band)` — target inflated at CPI + 2% education premium.
 - `plan_buy_home(home_price, down_payment_pct, current_year, target_year, current_savings, monthly_saving_capacity)` — down-payment target; return capped at 4.5% for horizons ≤ 5 years.
 
+Each `GoalPlan` carries the classic numbers (`target_amount_future`,
+`projected_amount`, `funding_gap`, `required_monthly_sip`, `success_prob`)
+plus a richer, more honest set of metrics for the UI to lead with:
+
+- `funding_ratio = projected / target` — distribution-free, intuitive ("79%
+  funded" reads correctly whether volatility assumptions are aggressive or
+  meek). Always the primary headline on the Dashboard.
+- `p10`, `p50`, `p90` — deciles of terminal wealth from a **2000-path
+  Monte-Carlo simulation** (`domain.calculators.monte_carlo_terminal_wealth`)
+  with monthly log-returns drawn from `N(μ_m, σ_m²)` where
+  `μ_m = ln(1+r)/12` and `σ_m = vol/√12`. Seeded (default 42) for
+  reproducibility; runs in ~10ms.
+- `outlook` — a categorical label ("On track" / "Uncertain" / "At risk")
+  from `outlook_band(funding_ratio, success_prob)`. Bands are calibrated so
+  a 95%-funded plan reads as *Uncertain*, not *At risk*, even if the point
+  probability is thin.
+
+The old `success_prob` is still computed and shown but is now labelled
+*"illustrative"* in every UI surface. Two reasons: (1) the previous formula
+used *annual* volatility as the *terminal* std, giving nonsensically low
+probabilities on 15-year plans that were only 20% short; (2) even after
+being fixed to a log-normal with `σ · √years`, collapsing a full terminal
+distribution to one number swings hard around the target. Users read
+"0.5%" as *doomed* when the plan is 79% funded. The funding ratio + MC
+band + outlook combo gives them a fairer signal.
+
 **`portfolio_agent.py`** — `analyze_portfolio(holdings, allow_live)`:
 market values via `domain.prices.get_price` (3-tier fallback), current-vs-target
 allocation %, drift (`|current − target|`), and per-holding price freshness metadata.
 Returns `PortfolioAnalysis`.
 
-**`benchmark_agent.py`** — expected return, volatility, Sharpe hint for the active
-model portfolio. Pure math over `MODEL_PORTFOLIOS` in `domain.models`.
+**`benchmark_agent.py`** — thin wrapper over `domain.benchmark.run_benchmarking`.
+Compares the active model's forward-looking expected return against a live 5Y
+realized CAGR of a peer ETF proxy (AOM/AOR/AOA), falling back to an
+illustrative reference constant when the live series is unavailable.
+`allow_live` propagates from `run_pipeline` so demo mode without network still
+renders. See §4.3 `domain/benchmark.py` for the mechanics.
 
 **`recommend_agent.py`** — `run_recommendation(ai_suggested_model, current_allocation_pct)` returns `RecommendationBundle`:
 
@@ -513,8 +683,44 @@ Public API:
 
 Returns `(price, source, as_of)` so the UI can badge freshness.
 
-**`risk.py`, `calculators.py`, `recommend.py`, `benchmark.py`** — pure math, no I/O.
+**`risk.py`, `calculators.py`, `recommend.py`** — pure math, no I/O.
 Fully unit-testable; see `tests/test_domain.py`.
+
+**`benchmark.py`** — proxy-ETF benchmarking with a live path. Each risk band
+maps to one iShares Core Allocation ETF whose Morningstar Target Risk category
+matches by construction:
+
+| Risk band | Proxy | ETF | Why this proxy |
+|---|---|---|---|
+| Moderate | AOM | iShares Core Moderate Allocation | ~40% equity / ~60% bonds; Moderate Target Risk peer |
+| Growth | AOR | iShares Core Growth Allocation | ~60% equity / ~40% bonds; Growth Target Risk peer |
+| Aggressive | AOA | iShares Core Aggressive Allocation | ~80% equity / ~20% bonds; Aggressive Target Risk peer |
+
+`run_benchmarking(model_name, *, allow_live=True)` pulls ~5Y of weekly closes
+via `alpha_vantage.get_weekly_series` (24h cached in a dedicated
+`av_series_cache.sqlite` so daily-series pulls don't evict live quotes),
+computes:
+
+- **CAGR** = `(end / start)^(1/years) − 1` over the trailing window
+- **annualized vol** = `stdev(log_returns) · √52`
+
+Falls back to `BenchmarkProxy.illustrative_return` (6.5% / 8.5% / 10.0%) on
+any AV failure, "premium-gated" response (AV free tier no longer serves
+`TIME_SERIES_DAILY?outputsize=full` — hence weekly), or series shorter than
+52 observations. `BenchmarkResult` carries `benchmark_source`
+(`"live_5y" | "illustrative_fallback"`) and `benchmark_series_weeks` so the
+Dashboard and Report can badge which path served the number.
+
+Caveat surfaced in the Report: weekly closes are price-only (no dividend
+adjustment), so the live CAGR understates AOM/AOR/AOA total return by ~2pp.
+Directional comparison to the portfolio's expected return remains valid.
+
+`domain/calculators.py` grew a few new primitives to back the honest-metrics
+overhaul: `funding_ratio(projected, target)`, `outlook_band(fr, prob)`, and
+`monte_carlo_terminal_wealth(...)` (2000 paths of monthly log-returns, uses
+Box-Muller so no numpy dependency, deterministic under a fixed seed). The
+existing `success_probability` gained a `years` parameter — the log-std now
+scales as `σ · √years` instead of using annual σ as terminal σ.
 
 ### 4.4 Infrastructure
 
@@ -522,6 +728,31 @@ Fully unit-testable; see `tests/test_domain.py`.
 (`huggingface_hub.InferenceClient`), reads `settings.llm_provider`,
 `settings.llm_model_id`. Returns raw text; retries on transient errors.
 `LLM_PROVIDER=none` short-circuits — no client is instantiated.
+
+Two staleness bugs that used to require a Python process restart to clear are
+now fixed in place:
+
+- **`.env` freezing.** `pydantic-settings` reads env + `.env` at *instantiation*,
+  so the module-level `settings = Settings()` snapshot never sees edits made to
+  `.env` while the app is running. `get_client()` and `chat()` now call
+  `_refresh_settings()` (a fresh `Settings()` per call) and prefer
+  `os.environ.get(...)` over the settings object — so rotating `HF_TOKEN`,
+  `LLM_PROVIDER`, or `LLM_MODEL_ID` in `.env` takes effect on the next chat
+  turn without restarting Streamlit.
+- **`InferenceClient` singleton.** The old client was cached on first use, so
+  even after `.env` was re-read, the underlying client kept using the original
+  token. The cache is now keyed on `(provider, model, token)`; any change
+  rebuilds the client. Token fingerprinting for logs uses `_fingerprint(token)`
+  which returns only the last 6 chars — never the full secret.
+
+Failure diagnostics live in the same module: `_classify_error(exc)` maps
+HTTP failures (401 unauthorized / 402 payment required / 403 forbidden /
+404 route not found / 429 rate limit / timeout / network) to short human
+labels. `chat()` catches every exception, stores the label in module-level
+`_last_error`, then re-raises so the advisor's exception path still fires.
+`last_error()` is the public accessor consumed by
+`agents/advisor._fallback_banner("llm_error")` to render the specific reason
+in the UI banner. A successful call clears `_last_error` back to `None`.
 
 **`llm/prompts.py`** — system prompt template + `DISCLAIMER` string used by the
 output guardrail.
@@ -545,14 +776,19 @@ respect the free-tier 5/min throttle. Exposes `get_quote`, `get_company_overview
 `get_news_sentiment`, `get_technical`, `get_sector_performance`, `get_fx_rate`.
 
 **`tools/calculators.py`** — pure-math financial calculators:
-`retirement_projection`, `plan_journey`, `savings_goal`, `asset_allocation`,
-`debt_payoff`, `emergency_fund`. `plan_journey` wraps `goal_agent.plan_*`
-so the chat can recompute the *same* projection + success probability the
-Dashboard renders, keyed off `MODEL_ASSUMPTIONS`. No network, no side effects.
+`retirement_projection`, `plan_retirement`, `plan_education`, `plan_home`,
+`savings_goal`, `asset_allocation`, `debt_payoff`, `emergency_fund`. The
+three `plan_*` wrappers thinly wrap `goal_agent.plan_*` so the chat can
+recompute the *same* projection + funding ratio + Monte-Carlo band the
+Dashboard renders, keyed off `MODEL_ASSUMPTIONS`. No network, no side
+effects. Split from a single `plan_journey(inputs: object)` — see the
+schema-tightening note in §4.2 for why.
 
 **`tools/registry.py`** — the OpenAI-compatible tool catalog (`TOOLS`) and dispatch
-table (`DISPATCH`) consumed by the ReAct loop in `advisor.py`. 12 tools total:
-6 Alpha Vantage + 6 calculators.
+table (`DISPATCH`) consumed by the ReAct loop in `advisor.py`. 14 tools total:
+6 Alpha Vantage + 8 calculators. Every `plan_*` schema declares all its
+inputs as `required` typed properties so the LLM can't silently omit or
+invent a field.
 
 **`guardrails.py`** — deterministic, no LLM. `apply_guardrails(text)` runs input
 screening (prompt-injection patterns, out-of-scope patterns, distress detection) and
@@ -560,6 +796,18 @@ output screening (scrub directive language, append disclaimer).
 
 **`config.py`** — `Settings` (pydantic-settings) reads `.env`. Single import point
 for `HF_TOKEN`, `ALPHA_VANTAGE_KEY`, `LLM_PROVIDER`, `LLM_MODEL_ID`, `CHROMA_DIR`.
+The module-level `settings = Settings()` singleton freezes at first import;
+`llm/client.py` reinstantiates `Settings()` per call so `.env` edits (notably
+`HF_TOKEN` rotation) take effect without restarting the Streamlit process.
+
+**`.streamlit/config.toml`** — Streamlit theme + `[server] fileWatcherType = "poll"`.
+The default watcher (`"auto"`) walks each imported module's `__path__` to build
+a reload list; that traversal hits transformers' lazy submodules
+(`transformers.models.zoedepth.image_processing_zoedepth_fast`) which try to
+`from torchvision.transforms.v2 import ...`, and since we don't install
+torchvision the walker emits a `ModuleNotFoundError` traceback on every hot
+reload. Polling is mtime-based, doesn't inspect `__path__`, and keeps the
+console clean without disabling hot reload.
 
 ---
 
@@ -638,7 +886,7 @@ sequenceDiagram
         P->>P: run_pipeline() (cache miss) → new PipelineResult
         P-->>U: dashboard reflects the change
     else user clicks Discard
-        FC->>FC: append "Discarded" to history; 
+        FC->>FC: append "Discarded" to history;
     end
 ```
 
@@ -671,10 +919,10 @@ sequenceDiagram
     participant AV as Alpha Vantage / calculators
     participant GR as guardrails
 
-    U->>ADV: answer_question(prompt, profile, k=6)
+    U->>ADV: answer_question(prompt, profile, page_facts, k=6)
     ADV->>RAG: search(prompt, k)
     RAG-->>ADV: [{source, text, score}, ...] (RRF-fused)
-    ADV->>ADV: build ReAct system prompt (persona + snippets + tool rules)
+    ADV->>ADV: build ReAct system prompt (persona + snippets + PAGE FACTS + tool rules)
 
     loop up to MAX_REACT_STEPS
         ADV->>LLM: chat(messages, tools=TOOLS, tool_choice="auto")
@@ -706,10 +954,31 @@ sequenceDiagram
     ADV-->>U: AdvisorAnswer(answer_markdown, citations, tool_calls, steps, stopped_reason)
 ```
 
-Snippet-echo fallback (LLM off / errors) takes the same shape but returns 3
-retrieved snippets verbatim with a `stopped_reason` of `"no_llm"` or `"llm_error"`
-and an empty `tool_calls` list — the UI collapses the audit-trail expander in that
-case.
+**Grounded fallback (LLM off / errors)** takes a different shape — it does not
+call `LLM` or `TOOLS` at all. Instead `_fallback_answer(question, snippets,
+profile, page_facts, reason)` composes a fully-formed markdown reply directly
+from the caller-supplied context:
+
+1. `_fallback_banner(reason)` prints an italic mode banner
+   (`no_llm` → "LLM is not configured…"; `llm_error` → "LLM temporarily
+   unavailable…") — the user is never left to guess why the response looks
+   different.
+2. `_format_plan_lines(page_facts)` bullets out the numbers already on the
+   user's screen (target, monthly SIP, success probability, allocation,
+   benchmark CAGR).
+3. `_format_profile_lines(profile)` bullets out the customer's own inputs
+   (age, income, risk band, journey, goal-input fields) — this keeps the
+   reply personalized even when the plan snapshot isn't in `page_facts` yet
+   (fresh onboarding, no cached pipeline).
+4. The top-3 RAG snippets are appended at the bottom as *reference reading*,
+   not as the answer body — the reply always leads with the user's own
+   numbers.
+
+`stopped_reason` is `"no_llm"` or `"llm_error"` and `tool_calls` is empty —
+the UI collapses the audit-trail expander in that case. The banner + grounded
+bullets ensure the user gets a specific, on-topic reply (their retirement
+plan, their child-education goal) instead of a generic RAG snippet echo, even
+when the underlying provider is dead.
 
 ### 5.4 Risk narrator — grounded rationale over the band
 
@@ -835,6 +1104,78 @@ flowchart LR
     CSV -- no --> SEED[PDF seed row 2026-07-13]
     SEED --> R3[return seed price + source=seed + as_of=2026-07-13]
 ```
+
+### 5.8 Mismatch guard → mini-onboarding
+
+When a user asks about a planning journey (e.g. `"how much should I set aside
+for my child's education?"`) for which their profile is missing the required
+inputs (`target_cost_today`, `child_current_age`, …), we don't want the ReAct
+advisor to hallucinate a plan against empty fields — we want to *fill the
+fields first*. The mismatch guard runs on every chat turn (both surfaces).
+When it fires, the floating panel redirects to the FinAdvisor page so the
+full-page chat can host a multi-turn mini-onboarding flow driven by
+`components/goal_setup.py`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant FA as pages/1_FinAdvisor (handler)
+    participant FC as floating_chat (panel)
+    participant INT as intent.classify_intent
+    participant OB as onboarding.missing_goal_input_fields
+    participant GS as goal_setup (state machine)
+    participant DB as data.upsert_customer
+    participant ORC as orchestrator.run_pipeline
+
+    U->>FC: "how much for child's education?"
+    FC->>INT: classify_intent(prompt)
+    INT-->>FC: intent(journey="Child Education", …)
+    FC->>OB: missing_goal_input_fields("Child Education", customer.goal_inputs)
+    OB-->>FC: ["target_cost_today", "child_current_age"]  (non-empty)
+    Note over FC: mismatch — floating panel cannot host multi-turn intake
+    FC->>FC: KEY_CHAT_PENDING_SETUP = "Child Education"
+    FC-->>U: render "Set up Child Education / Not now" card
+
+    alt user clicks "Set up Child Education"
+        FC->>FC: KEY_FA_PENDING_SETUP = "Child Education";
+        FC->>FA: st.switch_page("pages/1_FinAdvisor.py")
+        FA->>GS: start("Child Education")
+        loop for each required field
+            GS-->>FA: bot prompt (next question)
+            FA-->>U: chat bubble
+            U->>FA: answer
+            FA->>GS: submit_answer(answer)
+            GS-->>FA: (accepted, next_prompt or completion signal)
+        end
+        FA->>GS: commit()
+        GS->>DB: upsert_customer(customer with new primary_goal + goal_inputs)
+        GS-->>FA: done
+        FA->>ORC: run_pipeline(customer, "Child Education", goal_inputs, allow_live_prices=True)
+        ORC-->>FA: PipelineResult (cached in KEY_LAST_PIPELINE)
+        FA-->>U: "You're set up — ask me anything about your child-education plan."
+    else user clicks "Not now"
+        FC->>FC: clear KEY_CHAT_PENDING_SETUP
+        FC-->>U: "No problem — ask me anything else."
+    end
+```
+
+Two design notes:
+
+- The mismatch predicate is **only** `missing_goal_input_fields(...)` being
+  non-empty. An earlier version also required `intent.journey !=
+  customer.primary_goal` — that short-circuited when e.g. Sarah Chen's
+  `primary_goal` was already `"Child Education"` but her `goal_inputs` were
+  still retirement-shaped from prior testing, so the mismatch never fired
+  and the advisor kept answering with empty numbers. The `!=` clause was
+  wrong: the missing-fields check alone is the right predicate.
+- The floating panel *cannot* host the multi-turn intake itself: its surface
+  is a right-side dock, and any `st.switch_page` closes it. So it defers to
+  the FinAdvisor page via `KEY_FA_PENDING_SETUP`, which the page picks up on
+  its next render and hands to `goal_setup.start()`. The main-page handler
+  routes `goal_setup.is_active()` before `propose_change` / `OUT_OF_SCOPE` /
+  mismatch guard / `answer_question`, so once the mini-onboarding is live
+  every subsequent turn feeds `submit_answer`.
 
 ---
 

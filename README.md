@@ -78,6 +78,12 @@ Price data has three tiers:
 2. **`data/prices/history.csv`** — daily-appended source-of-truth floor. Diffable in git.
 3. **PDF seed row** (`2026-07-13`) — absolute last resort so no ticker ever renders empty.
 
+Benchmarking also pulls from Alpha Vantage: `TIME_SERIES_WEEKLY` for each risk
+band's peer ETF (AOM / AOR / AOA), 24h-cached, from which the app computes a
+5Y realized CAGR + realized volatility. Falls back to a hardcoded illustrative
+long-run return when the series is unavailable — the Dashboard and Report
+badge which path served the number.
+
 ## Prerequisites
 
 - **Python 3.12+** (`python3 --version` — 3.12 or 3.13 both work).
@@ -110,7 +116,7 @@ cp .env.example .env
 #   LLM_MODEL_ID=meta-llama/Llama-3.3-70B-Instruct        (or Llama-3.1-8B for a smaller/faster demo)
 
 # 3. Sanity-check with the offline test suite (no keys required)
-make test                 # 37/37 should pass in <10s
+make test                 # 40/40 should pass in <10s
 
 # 4. Build the RAG index from corpus/ (Chroma + sentence-transformers)
 make index                # first run downloads the embedder — ~1-2 min
@@ -200,13 +206,69 @@ The sidebar shows the **active customer** (picker across seeded hero customers) 
 the **LLM provider label** (`groq · Llama-3.3-70B-Instruct` or `OFF · rule-based
 fallback`).
 
+## Running via Docker
+
+Production shape — multi-stage build, non-root runtime user, healthcheck, named
+volume for HITL state / Chroma / price cache.
+
+```bash
+# 1. Copy .env.example to .env and fill in HF_TOKEN + ALPHA_VANTAGE_KEY.
+cp .env.example .env
+
+# 2. Build + start
+docker compose up --build -d
+
+# 3. Open http://localhost:8501
+```
+
+The image copies `data/seed/` in at build time (so seed customers ship with the
+image) but keeps mutable state — `data/profile.db`, `data/chroma/`,
+`data/prices/`, `data/processed/`, `data/raw/` — on the `finadvisor-data`
+named volume, so the HITL log and RAG index survive `docker compose down`
+and re-`up`.
+
+**First-run indexing.** The image does not run `build_rag_index.py` at build
+time (needs the corpus wired through Chroma at runtime paths). After the first
+`up`, run it once against the running container:
+
+```bash
+docker compose exec finadvisor python scripts/build_rag_index.py
+docker compose exec finadvisor python scripts/seed_customers.py
+```
+
+Subsequent restarts skip both — the volume persists them.
+
+**Env vars.** Never bake secrets into the image; `.env` is on `.dockerignore`
+and is passed at run time via `env_file:` in `docker-compose.yml`. To rotate
+`HF_TOKEN` / `ALPHA_VANTAGE_KEY`, edit `.env` and `docker compose restart`.
+
+**Logs, health, shell.**
+
+```bash
+docker compose logs -f finadvisor          # tail streamlit + agent logs
+docker compose ps                           # STATUS shows (healthy) once healthcheck passes
+docker compose exec finadvisor bash         # shell inside the container as the `app` user
+docker compose exec finadvisor pytest -q    # run the offline test suite in-container
+```
+
+**Plain-`docker` equivalent** (no compose):
+
+```bash
+docker build -t nexwealth/finadvisor:latest .
+docker run --rm -d --name finadvisor \
+    -p 8501:8501 \
+    --env-file .env \
+    -v finadvisor-data:/app/data \
+    nexwealth/finadvisor:latest
+```
+
 ### Page flow
 
 | Page | What happens |
 |---|---|
 | **Home** | Select a seeded customer or start a new-customer onboarding; quick-start prompts route into the chat. |
 | **FinAdvisor** | Chat-style prompt with quick-start pills → intent classifier. Planning intents route into Risk Profile → Recommendations. Financial Q&A runs the **ReAct advisor** — retrieve, then loop over 12 tools until the LLM has enough to answer. Every response shows citations + a tool-call audit trail. |
-| **Dashboard** | Full picture for the active customer: risk band, goal projection line, allocation donut, current-vs-target bars, benchmark stats, holdings table with price freshness, HITL log. |
+| **Dashboard** | Full picture for the active customer: risk band, goal projection line + funding-ratio + MC p10/p50/p90, allocation donut, current-vs-target bars, benchmark card (proxy ETF + live 5Y CAGR with "Why this proxy?" tooltip), holdings table with price freshness, HITL log. |
 | **Risk Profile** | Arc gauge score + five-question tolerance/capacity questionnaire → risk band. Journey-specific goal inputs (retirement age, tuition target, home price, etc.) saved to the customer. |
 | **Recommendations** | Three investment options centered on the AI-suggested band, with a grounded **LLM rationale** rendered above the option cards (source-badge caption indicates `llm` / `template` / `llm_error_fallback`). HITL: Approve / Reject / Override (with a different model or a custom asset-class allocation). |
 | **Report** | Dashboard block + full markdown report (Risk Profile, Goal Plan, Portfolio, Benchmarking, Recommendation, HITL Decision Log). Downloadable `.md`. |
@@ -314,7 +376,8 @@ financial-advisor-llm/
 ├── data/
 │   ├── seed/customers.json # hero customers loaded by scripts/seed_customers.py
 │   ├── prices/history.csv  # daily-appended price history (three-tier floor)
-│   ├── raw/av_cache.sqlite # Alpha Vantage request cache
+│   ├── raw/av_cache.sqlite         # Alpha Vantage quote cache (60min TTL)
+│   ├── raw/av_series_cache.sqlite  # Alpha Vantage weekly-series cache (24h TTL)
 │   ├── chroma/             # RAG vector store (gitignored)
 │   └── profile.db          # customers, holdings, agent_runs, hitl_log (gitignored)
 ├── scripts/                # refresh_prices, prewarm_cache, seed_customers,

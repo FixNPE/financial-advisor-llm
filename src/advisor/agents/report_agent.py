@@ -43,6 +43,11 @@ def compose_summary(customer: Customer, journey: str, goal: GoalPlan,
             "gap": goal.funding_gap,
             "required_sip": goal.required_monthly_sip,
             "success_prob": goal.success_prob,
+            "funding_ratio": goal.funding_ratio,
+            "outlook": goal.outlook,
+            "p10": goal.p10,
+            "p50": goal.p50,
+            "p90": goal.p90,
         },
         "portfolio": {
             "market_value": analysis.total_market_value,
@@ -56,6 +61,8 @@ def compose_summary(customer: Customer, journey: str, goal: GoalPlan,
             "portfolio_return": benchmark.portfolio_expected_return,
             "benchmark_return": benchmark.benchmark_expected_return,
             "excess": benchmark.excess_return,
+            "source": benchmark.benchmark_source,
+            "series_weeks": benchmark.benchmark_series_weeks,
         },
         "recommendation": {
             "ai_suggested": rec.ai_suggested,
@@ -96,6 +103,9 @@ def build_markdown_report(customer: Customer, journey: str, goal: GoalPlan,
     lines.append(f"- **Target (inflated to year {goal.years:.0f}):** {_fmt_usd(goal.target_amount_future)}")
     lines.append(f"- **Projected corpus at horizon:** {_fmt_usd(goal.projected_amount)}")
     lines.append(f"- **Funding gap:** {_fmt_usd(goal.funding_gap)}")
+    lines.append(f"- **Funding ratio:** {_fmt_pct(goal.funding_ratio * 100)} · **Outlook:** {goal.outlook}")
+    lines.append(f"- **Monte-Carlo terminal wealth (p10 / p50 / p90):** "
+                    f"{_fmt_usd(goal.p10)} / {_fmt_usd(goal.p50)} / {_fmt_usd(goal.p90)}")
     lines.append(f"- **Required monthly SIP to close gap:** {_fmt_usd(goal.required_monthly_sip)}")
     lines.append(f"- **Success probability (illustrative):** {_fmt_pct(goal.success_prob * 100)}")
     lines.append("")
@@ -132,10 +142,21 @@ def build_markdown_report(customer: Customer, journey: str, goal: GoalPlan,
 
     lines.append("## Benchmarking")
     lines.append(f"- **Proxy:** {benchmark.proxy_name} (`{benchmark.proxy_ticker}`)")
+    lines.append(f"- *Why this proxy:* {benchmark.rationale}")
+    if benchmark.benchmark_source == "live_5y":
+        _bench_src = (f"live 5Y CAGR from Alpha Vantage weekly closes "
+                        f"({benchmark.benchmark_series_weeks} observations)")
+    else:
+        _bench_src = "illustrative long-run return (live series unavailable)"
     lines.append(f"- Portfolio expected return: {_fmt_pct(benchmark.portfolio_expected_return * 100)} · "
-                    f"Benchmark: {_fmt_pct(benchmark.benchmark_expected_return * 100)} · "
-                    f"Illustrative excess: {_fmt_pct(benchmark.excess_return * 100)}")
+                    f"Benchmark: {_fmt_pct(benchmark.benchmark_expected_return * 100)} "
+                    f"({_bench_src}) · "
+                    f"Excess: {_fmt_pct(benchmark.excess_return * 100)}")
     lines.append(f"- Underlying blend: {benchmark.blend_description}")
+    if benchmark.benchmark_source == "live_5y":
+        lines.append("- *Note:* live benchmark return is close-only (excludes "
+                     "dividend reinvestment), so total return is ~2pp higher in practice. "
+                     "Directional comparison to the portfolio's expected return remains valid.")
     lines.append("")
 
     lines.append("## Recommendation")

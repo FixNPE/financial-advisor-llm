@@ -21,7 +21,9 @@ from advisor.domain.data import commit_hitl_decision  # noqa: E402
 from advisor.domain.models import ASSET_CLASSES  # noqa: E402
 
 from app.components.floating_chat import render_floating_chat  # noqa: E402
-from app.components.session import KEY_HITL_PENDING, KEY_LAST_PIPELINE  # noqa: E402
+from app.components.session import (  # noqa: E402
+    KEY_HITL_PENDING, KEY_LAST_PIPELINE, valid_pipeline,
+)
 from app.components.theme import BRAND_NAME, apply_theme  # noqa: E402
 
 st.set_page_config(page_title=f"Recommendations · {BRAND_NAME}",
@@ -47,7 +49,7 @@ else:
 
 prev = st.session_state.get(KEY_LAST_PIPELINE)
 needs_recompute = (
-    prev is None or prev.customer_id != customer.id or prev.journey != journey
+    not valid_pipeline(prev, customer.id, journey)
     or st.button("Re-run pipeline", type="secondary")
 )
 if needs_recompute:
@@ -185,10 +187,14 @@ _option_summary = "; ".join(
     f"fit {o.fit_score:.0f}"
     for o in rec.options
 )
+_gi = customer.goal_inputs or {}
 render_floating_chat(
     page_key="Recommendations",
     page_context={
         "Journey": journey,
+        "Goal inputs (use verbatim)": (
+            ", ".join(f"{k}={v}" for k, v in _gi.items()) if _gi else None
+        ),
         "AI-suggested model": rec.ai_suggested,
         "Active model": rec.active_model,
         "Overridden": "yes" if rec.is_overridden else "no",
@@ -198,9 +204,14 @@ render_floating_chat(
         "Horizon (years)": _goal.years,
         "Target amount (future $)": f"${_goal.target_amount_future:,.0f}",
         "Projected amount at horizon": f"${_goal.projected_amount:,.0f}",
+        "Funding ratio": f"{_goal.funding_ratio * 100:.0f}%",
+        "Outlook": _goal.outlook,
+        "Monte-Carlo p10 / p50 / p90": (
+            f"${_goal.p10:,.0f} / ${_goal.p50:,.0f} / ${_goal.p90:,.0f}"
+        ),
         "Funding gap": f"${_goal.funding_gap:,.0f}",
         "Required monthly SIP to close gap": f"${_goal.required_monthly_sip:,.0f}",
-        "Success probability": f"{_goal.success_prob * 100:.1f}%",
+        "Success probability (illustrative)": f"{_goal.success_prob * 100:.1f}%",
     },
     customer=customer,
 )

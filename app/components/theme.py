@@ -445,6 +445,69 @@ section[data-testid="stMain"]:has(.st-key-nw_chat_panel) div[data-testid="stMain
     gap: 0.35rem !important;
 }
 
+/* Scrollable chat history — keeps a long conversation inside its own frame
+   so the input row stays anchored below and doesn't get pushed off-screen.
+   render_history() wraps its bubbles in st.container(key="nw_chat_scroll")
+   (or nw_chat_scroll_fc inside the floating panel, which is already a
+   smaller frame). */
+.st-key-nw_chat_scroll {
+    max-height: 65vh !important;
+    overflow-y: auto !important;
+    padding-right: 6px !important;
+    scrollbar-width: thin;
+}
+.st-key-nw_chat_scroll_fc {
+    max-height: 50vh !important;
+    overflow-y: auto !important;
+    padding-right: 6px !important;
+    scrollbar-width: thin;
+}
+.st-key-nw_chat_scroll::-webkit-scrollbar,
+.st-key-nw_chat_scroll_fc::-webkit-scrollbar {
+    width: 6px;
+}
+.st-key-nw_chat_scroll::-webkit-scrollbar-thumb,
+.st-key-nw_chat_scroll_fc::-webkit-scrollbar-thumb {
+    background: var(--nw-card-border);
+    border-radius: 3px;
+}
+
+/* Chat bubble alignment — bot on the left, user on the right.
+   render_history() renders bot turns via st.chat_message("assistant") and
+   user turns via a plain markdown block wrapped in .nw-chat-user so we
+   don't depend on Streamlit's internal chat DOM. The bot bubble gets a
+   soft card background; the user bubble is right-aligned with a filled
+   blue background, mirroring standard chat conventions. */
+.nw-chat-user {
+    display: flex;
+    justify-content: flex-end;
+    margin: 6px 0;
+}
+.nw-chat-user-bubble {
+    background: var(--nw-blue, #2563EB);
+    color: #FFFFFF;
+    border-radius: 14px 14px 4px 14px;
+    padding: 8px 14px;
+    max-width: 78%;
+    font-size: 14px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.nw-chat-user-bubble a { color: #E5EDFF; text-decoration: underline; }
+
+[data-testid="stChatMessage"] {
+    background: transparent !important;
+    padding-left: 0 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stChatMessageContent"] {
+    background: var(--nw-card, #FFFFFF);
+    border: 1px solid var(--nw-card-border, #E5E7EB);
+    border-radius: 14px 14px 14px 4px;
+    padding: 8px 14px;
+    max-width: 78%;
+}
+
 /* Panel header title row */
 .nw-chat-header {
     display: flex; align-items: center; justify-content: space-between;

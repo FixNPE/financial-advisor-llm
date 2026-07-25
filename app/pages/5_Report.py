@@ -14,7 +14,7 @@ from advisor.domain.data import latest_committed_for_journey  # noqa: E402
 
 from app.components.dashboard import render  # noqa: E402
 from app.components.floating_chat import render_floating_chat  # noqa: E402
-from app.components.session import KEY_LAST_PIPELINE  # noqa: E402
+from app.components.session import KEY_LAST_PIPELINE, valid_pipeline  # noqa: E402
 from app.components.theme import BRAND_NAME, apply_theme  # noqa: E402
 
 st.set_page_config(page_title=f"Report · {BRAND_NAME}",
@@ -39,7 +39,7 @@ else:
     journey = _saved_journey
 
 prev = st.session_state.get(KEY_LAST_PIPELINE)
-if prev is None or prev.customer_id != customer.id or prev.journey != journey:
+if not valid_pipeline(prev, customer.id, journey):
     with st.spinner("Running pipeline..."):
         result = run_pipeline(customer, journey, customer.goal_inputs, allow_live_prices=True)
     st.session_state[KEY_LAST_PIPELINE] = result
@@ -75,18 +75,27 @@ st.download_button(
 )
 
 _goal = result.goal
+_gi = customer.goal_inputs or {}
 render_floating_chat(
     page_key="Report",
     page_context={
         "Journey": journey,
+        "Goal inputs (use verbatim)": (
+            ", ".join(f"{k}={v}" for k, v in _gi.items()) if _gi else None
+        ),
         "Active model": result.recommendation.active_model,
         "Risk band": f"{result.risk.risk_band} (score {result.risk.risk_score})",
         "Assumed annual return": f"{_goal.assumed_annual_return:.2%}",
         "Horizon (years)": _goal.years,
         "Target amount (future $)": f"${_goal.target_amount_future:,.0f}",
         "Projected amount at horizon": f"${_goal.projected_amount:,.0f}",
+        "Funding ratio": f"{_goal.funding_ratio * 100:.0f}%",
+        "Outlook": _goal.outlook,
+        "Monte-Carlo p10 / p50 / p90": (
+            f"${_goal.p10:,.0f} / ${_goal.p50:,.0f} / ${_goal.p90:,.0f}"
+        ),
         "Funding gap": f"${_goal.funding_gap:,.0f}",
-        "Success probability": f"{_goal.success_prob * 100:.1f}%",
+        "Success probability (illustrative)": f"{_goal.success_prob * 100:.1f}%",
         "Committed HITL decision": (latest.get("final_action") if latest else "none yet"),
         "Final choice": (latest.get("final_choice") if latest else None),
     },

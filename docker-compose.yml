@@ -1,9 +1,25 @@
 services:
-  app:
-    build: .
+  finadvisor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nexwealth/finadvisor:latest
+    container_name: finadvisor
+    restart: unless-stopped
     ports:
-      - "8501:7860"
+      - "8501:8501"
     env_file:
       - .env
-    environment:
-      - PORT=7860
+    volumes:
+      # Persist HITL SQLite state, Chroma vector store, and Alpha Vantage
+      # price cache across container restarts.
+      - finadvisor-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  finadvisor-data:
