@@ -224,6 +224,7 @@ else:
                     if st.button("Open the full plan on the Dashboard →",
                                     type="primary", use_container_width=True,
                                     key="onboard_go_dashboard"):
+                        set_active_customer(result.customer_id)
                         st.switch_page("pages/2_Dashboard.py")
                     if st.button("Start over",
                                     key="onboard_restart_after_done"):
