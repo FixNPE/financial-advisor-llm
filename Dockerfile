@@ -53,11 +53,19 @@ COPY --chown=app:app scripts ./scripts
 COPY --chown=app:app corpus ./corpus
 COPY --chown=app:app data/seed ./data/seed
 
-# Writable dirs for the SQLite HITL DB, Chroma index, price cache.
-RUN mkdir -p /app/data/chroma /app/data/prices /app/data/processed /app/data/raw \
-    && chown -R app:app /app/data
+# Writable dirs for the SQLite HITL DB, Chroma index, price cache, plus the
+# HF cache dir (sentence-transformers downloads the embedder to ~/.cache).
+RUN mkdir -p /app/data/chroma /app/data/prices /app/data/processed /app/data/raw /app/.cache \
+    && chown -R app:app /app/data /app/.cache
 
+# Baked at build time so the image is self-contained on platforms without
+# persistent storage (e.g. Hugging Face Spaces free tier): the RAG index
+# over corpus/, and the seeded hero customers. Runs as `app` so the output
+# files are owned correctly (matches the chown above). Re-running against
+# an existing --db is idempotent (see scripts/seed_customers.py).
 USER app
+RUN python scripts/build_rag_index.py \
+    && python scripts/seed_customers.py
 
 EXPOSE 8501
 
