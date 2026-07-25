@@ -605,6 +605,15 @@ def _customer_chip_and_picker() -> None:
     if current_id not in label_by_id:
         current_id = customers[0].id
 
+    # Streamlit selectboxes with an explicit `key` remember their own value
+    # across reruns and ignore `index=` once that key exists — so a
+    # programmatic change to the active customer (e.g. from onboarding)
+    # would otherwise be silently overridden back to the widget's stale
+    # stored value on the very next render. Force the widget's own state to
+    # follow the true active customer before instantiating it.
+    if st.session_state.get("sidebar_customer_selectbox") != current_id:
+        st.session_state["sidebar_customer_selectbox"] = current_id
+
     active = next((c for c in customers if c.id == current_id), customers[0])
     st.markdown(
         f"""
