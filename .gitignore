@@ -10,11 +10,6 @@ data/raw/
 data/processed/
 data/profile.db
 
-corpus/sec_education/*
-corpus/irs_pubs/*
-corpus/finra_investor/*
-!corpus/**/.gitkeep
-
 .DS_Store
 .idea/
 .vscode/
